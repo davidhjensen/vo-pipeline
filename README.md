@@ -14,11 +14,11 @@ To see details, check out `env.yml` in the root directory.
 
 From the repository root, run:
 
-`conda env create -f environment.yml`
+`conda env create -f env.yml`
 
 If the environment already exists, update it with:
 
-`conda env update -f environment.yml --prune`
+`conda env update -f env.yml --prune`
 
 ### Using the Project in VS Code
 
