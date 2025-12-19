@@ -1,5 +1,5 @@
 # Visual Odometry Pipeline
-Full-stack SLAM pipeline tested on standard CV datasets as well as custom dataset
+Full-stack VO pipeline tested on standard CV datasets as well as custom dataset
 
 ## Development Environment
 
