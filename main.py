@@ -394,12 +394,15 @@ class Pipeline():
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
         
         return (new_state, camera_pose)
+    
 
-    def tryTriangulating(self, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
+    
+    def tryTriangulating(params: VO_Params, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
         """
         Triangulate new points based on the bearing angle threshold to ensure sufficient baseline without relying on scale (ambiguous)
         
         Args:
+            params (VO_Params): parameters for the VO pipeline
             state (dict): current state that also contains 2D keypoints and 3D points
             cur_pose (np.ndarray): pose of current frame (3x4 matrix) 
         Returns:
@@ -416,73 +419,51 @@ class Pipeline():
         m = pts_2D_cur.shape[0]
         if pts_2D_first_obs.shape[0] != m: 
             print("ERROR in shapes of tracked keypoints")
+        print(f"2d_cur shape: {pts_2D_cur.shape}\n2d_first shape: {pts_2D_first_obs.shape}\n")
 
         pts_2D_cur_hom = np.column_stack((pts_2D_cur, np.ones(m)))
         pts_2D_first_obs_hom = np.column_stack((pts_2D_first_obs, np.ones(m)))
-        K = self.params.k
+        K = params.k
         K_inv = np.linalg.inv(K)
         n_pts_2D_cur = K_inv@pts_2D_cur_hom.T #(3,m)
         n_pts_2D_first_obs = K_inv@pts_2D_first_obs_hom.T #(3,m)
         
         first_poses_mat = state["T"].copy()  #flattened on C order (m,12)
         first_poses_mat_tensor = first_poses_mat.reshape(m, 3, 4) #(m,3,4)
-        t_f_obs = first_poses_mat_tensor[:, :, -1] #(m,3)
         R_f_obs = first_poses_mat_tensor[:, :, :-1] #(m,3,3)
 
         #Project all the candidate points that have been tracked up to now
-        t = cur_pose[:, -1]
         R_inv = cur_pose[:, :-1].T
 
-        pts_3d_cur = R_inv @ (n_pts_2D_cur-t[:, None]) #(3,m) each is a vector in the world's coordinate frame
-        
-        #Transform it into a vector expressed in the world frame but going from camera pose to point: i.e. subtract the translation
-        cur_to_kp = pts_3d_cur - t[:, None] #(3,m)
+        cur_to_kp = R_inv @ n_pts_2D_cur #(3,m) each is a vector in the world's coordinate frame
         cur_to_kp = cur_to_kp.T #(m,3)
 
         #Project all the points at their first observation
         n_pts_2D_first_obs = n_pts_2D_first_obs.T[:, :, None] #add dimension for batching (m,3,1)
-        t_f_obs = t_f_obs[:,:,None] #(m,3,1)
         R_f_obs_inv = R_f_obs.transpose(0,2,1) #(m,3,3)
 
-        pts_3d_first_obs = R_f_obs_inv @ (n_pts_2D_first_obs-t_f_obs) #(m,3,1)
-        pts_3d_first_obs = pts_3d_first_obs.squeeze(-1) #(m,3) each is a vector in the world's coordinate frame
-        
-        #Transform it into a vector expressed in the world frame but going from camera pose to point: i.e. subtract the translation
-        first_to_kp = pts_3d_first_obs - t_f_obs.squeeze(-1) #(m,3)
+        pts_3d_first_obs = R_f_obs_inv @ n_pts_2D_first_obs #(m,3,1)
+        first_to_kp = pts_3d_first_obs.squeeze(-1) #(m,3) each is a vector in the world's coordinate frame
         
         #Compute bearing angle between the projections
-        #Extract x-z plane coordinates
-        cur_to_kp_xz = np.column_stack((cur_to_kp[:,0], cur_to_kp[:,2])) #(m,2)
-        first_to_kp_xz =  np.column_stack((first_to_kp[:,0], first_to_kp[:,2])) #(m,2)
-        
-        #Compute norms to normalize vectors
-        cur_norms = np.linalg.norm(cur_to_kp_xz, axis = 1)
-        first_norms = np.linalg.norm(first_to_kp_xz, axis = 1)
+        cur_bearings = cur_to_kp / np.linalg.norm(cur_to_kp, axis=1, keepdims=True)
+        first_bearings = first_to_kp / np.linalg.norm(first_to_kp, axis=1, keepdims=True)
 
-        #Normalize vectors
-        cur_to_kp_xz /= cur_norms[:, None] #(m,2)
-        first_to_kp_xz /= first_norms[:, None] #(m,2)
-        
-        x_axis = np.array([1, 0])
-        cur_c_beta = np.dot(cur_to_kp_xz, x_axis) 
-        first_c_gamma = np.dot(first_to_kp_xz, x_axis)
+        # Compute angle between rays
+        cos_alpha = np.sum(cur_bearings * first_bearings, axis=1)
+        cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+        alpha = np.arccos(cos_alpha)
 
-        cur_beta = np.arccos(cur_c_beta)
-        first_gamma = np.arccos(first_c_gamma)
-
-        alpha = abs(cur_beta - first_gamma)
-        
         #Find indices of where alpha exceeds the threshold
-        idx = np.where(alpha > self.params.alpha)[0]
-        not_idx = np.where(alpha <= self.params.alpha)[0]
-
+        idx = np.where(alpha > params.alpha)[0]
+        not_idx = np.where(alpha <= params.alpha)[0]
         
         #Extract the corresponding matrices
         poses = first_poses_mat[idx]
         valid_pts_2D_first = pts_2D_first_obs[idx, :]
         valid_pts_2D_cur = pts_2D_cur[idx, :]
         
-        rounded_poses = np.round(poses, decimals=6)
+        rounded_poses = np.round(poses, decimals=5)
         
         #Find the indices where the transformation is the same as well as the unique poses
         unique_poses, inverse_idx = np.unique(rounded_poses, axis=0, return_inverse=True)
@@ -494,7 +475,7 @@ class Pipeline():
         proj_2 = K @ cur_pose
         
         for i, g in enumerate(groups):
-            proj_1 = unique_poses[i].reshape(3,4)
+            proj_1 = K@(unique_poses[i].reshape(3,4))
             valid_pts_1 = valid_pts_2D_first[g].T #(2,k)
             valid_pts_2 = valid_pts_2D_cur[g].T #(2,k)
             points_homo = cv2.triangulatePoints(proj_1, proj_2, valid_pts_1, valid_pts_2)
@@ -512,6 +493,7 @@ class Pipeline():
         state["T"] = first_poses_mat[not_idx, :]
         
         return state
+
 
     def extractFeaturesOperation(self, img_grayscale):
         """
