@@ -71,12 +71,12 @@ feature_params = dict( maxCorners = 100,
                        blockSize = 7 )
 
 # Parameters for LKT
-lk_params = dict( winSize  = (15, 15),
+lk_params = dict( winSize  = (20, 20),
                   maxLevel = 2,
                   criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
 # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-new_feature_min_squared_diff = 5
+new_feature_min_squared_diff = 10
 
 
 # Next keyframe to use for bootstrapping
@@ -619,6 +619,15 @@ class Pipeline():
         )
         ax.add_patch(heading_arrow)
 
+        # ---- 3D map points (x–z projection) ----
+        map_scatter = ax.scatter(
+            [], [],
+            s=6,
+            c="black",
+            alpha=0.4,
+            label="Map points (x–z)"
+        )
+
         # ---- Formatting ----
         ax.set_title("Ground Truth vs VO Estimated Trajectory")
         ax.set_xlabel("x [m]")
@@ -637,10 +646,11 @@ class Pipeline():
             "est_line": est_line,
             "est_point": est_point,
             "heading_arrow": heading_arrow,
+            "map_scatter": map_scatter,
             "arrow_len": arrow_len,
         }
 
-    def updateTrajectoryPlot(self, plot_state: Dict[str, object], est_path: np.ndarray, theta: float) -> None:
+    def updateTrajectoryPlot(self, plot_state: Dict[str, object], est_path: np.ndarray, theta: float, pts3d: np.ndarray) -> None:
         """
         Update estimated trajectory and camera orientation arrow.
 
@@ -656,6 +666,9 @@ class Pipeline():
         # Update trajectory
         plot_state["est_line"].set_data(x, y)
         plot_state["est_point"].set_data([x[-1]], [y[-1]])
+
+        # Update 3dpts
+        plot_state["map_scatter"].set_offsets(np.column_stack((pts3d[0, :], pts3d[2, :])))
 
         # Update orientation arrow
         x0, y0 = x[-1], y[-1]
@@ -827,7 +840,7 @@ for i in range(params.start_idx + 1, last_frame + 1):
 
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
-    # img_to_show = pipeline.draw_new_features(img_to_show, potential_candidate_features)
+    img_to_show = pipeline.draw_new_features(img_to_show, potential_candidate_features)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
@@ -839,7 +852,7 @@ for i in range(params.start_idx + 1, last_frame + 1):
     t_cw = - R_cw @ t_wc
     est_path.append([t_cw[0], t_cw[2]])
     theta = scipy.spatial.transform.Rotation.from_matrix(R_cw).as_euler("xyz")[1]
-    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta - np.pi)
+    pipeline.updateTrajectoryPlot(plot_state, np.asarray(est_path), theta - np.pi, S["X"])
 
     # update last image
     last_image = image
@@ -849,7 +862,7 @@ for i in range(params.start_idx + 1, last_frame + 1):
     print(f"# Keypoints Tracked: {last_features.shape[0]}\n# Candidates Tracked: {last_candidates.shape[0]}\n# Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n# New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
 
     # pause for 0.01 seconds
-    cv2.imshow("tracking...", img_to_show)
+    cv2.imshow("tracking...", last_image)
     cv2.waitKey(10)
 
 cv2.destroyAllWindows()
