@@ -13,7 +13,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch
 
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 2
 
 # Define dataset paths
 # (Set these variables before running)
@@ -38,7 +38,7 @@ if DATASET == 0:
 elif DATASET == 1:
     assert 'malaga_path' in locals(), "You must define malaga_path"
     img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
+    images = sorted(glob(os.path.join(img_dir, '*.jpg')))
     last_frame = len(images)
     K = np.array([
         [621.18428, 0, 404.0076],
@@ -248,7 +248,7 @@ class Pipeline():
         E= K.T@ fundamental_matrix@K
 
         #recover the relative camera pose
-        _,R,t,mask_pose=cv2.recoverPose(E,points1[inliers],points2[inliers],K)
+        _,R,t,_=cv2.recoverPose(E,points1[inliers],points2[inliers],K)
 
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
@@ -267,9 +267,13 @@ class Pipeline():
         # projection matrices
         proj_1 = self.params.k @ np.hstack([np.eye(3), np.zeros((3,1))])
         proj_2 = self.params.k @ H
+        
+        # reshaping the points into 2xK
+        p1 = points_1.reshape(-1,2).T
+        p2 = points_2.reshape(-1,2).T
 
         # triangulate homogeneous coordinates using DLT
-        points_homo = cv2.triangulatePoints(proj_1, proj_2, points_1, points_2)
+        points_homo = cv2.triangulatePoints(proj_1, proj_2, p1, p2)
 
         # convert back to 3D
         points_3d = (points_homo[:3, :]/points_homo[3, :])
@@ -362,6 +366,9 @@ class Pipeline():
         # print(pts_2D.shape)
         # print("Shape of 3D points")
         # print(pts_3D.shape)
+
+        assert state["X"].shape[1] == state["P"].shape[0], "The number of 2D points does not match the number of 3D correspondencies"
+
         success, r_vec, t_vec, inliers_idx =  cv2.solvePnPRansac(
             objectPoints=pts_3D,
             imagePoints=pts_2D,
@@ -379,8 +386,14 @@ class Pipeline():
         
         # r_vec needs to be converted into a 3x3
         R, _ = cv2.Rodrigues(r_vec)    
-        camera_pose = np.hstack((R, t_vec))
+        T_w2c = np.hstack((R, t_vec))
         
+        # must be double check for consistency with other parts of the code that use T
+        # R_c2w = R.T
+        # t_c2w = -R.T @ t_vec
+        # T_c2w = np.hstack((R_c2w, t_c2w)) 
+
+
         # now, inliers are the indices in pts_2d and pts_3d corresponding to the inliers; it is a 2D since openCV returns it as such, so we need to convert it in a 1D array to use np features
         inliers_idx = inliers_idx.flatten()
         new_state = state.copy()
@@ -388,7 +401,7 @@ class Pipeline():
         new_state["P"] = state["P"][inliers_idx]
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
 
-        return new_state, camera_pose, inliers_idx
+        return new_state, T_w2c, inliers_idx
     
 
     
