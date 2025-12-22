@@ -13,7 +13,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch
 
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 2
+DATASET = 0
 
 # Define dataset paths
 # (Set these variables before running)
@@ -65,8 +65,8 @@ else:
     raise ValueError("Invalid dataset index")
 
 # Paramaters for Shi-Tomasi corners
-feature_params = dict( maxCorners = 30,
-                       qualityLevel = 0.1,
+feature_params = dict( maxCorners = 100,
+                       qualityLevel = 0.08,
                        minDistance = 7,
                        blockSize = 7 )
 
@@ -102,7 +102,7 @@ class VO_Params():
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     # ADD NEW PARAMS HERE
-    alpha: float = 0.11
+    alpha: float = 0.04
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
         self.bs_kf_1 = bs_kf_1
@@ -368,7 +368,7 @@ class Pipeline():
             cameraMatrix=K,
             distCoeffs=None,
             flags=cv2.SOLVEPNP_EPNP,
-            reprojectionError=2.0,
+            reprojectionError=5.0,
             confidence=0.9,
             iterationsCount=100
         )
