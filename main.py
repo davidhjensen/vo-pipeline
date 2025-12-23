@@ -13,7 +13,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch
 
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 2
+DATASET = 0
 
 # Define dataset paths
 # (Set these variables before running)
