@@ -39,6 +39,7 @@ elif DATASET == 1:
     assert 'malaga_path' in locals(), "You must define malaga_path"
     img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
     images = sorted(glob(os.path.join(img_dir, '*.jpg')))
+    images = images[0::2]   # left
     last_frame = len(images)
     K = np.array([
         [621.18428, 0, 404.0076],
@@ -65,18 +66,33 @@ else:
     raise ValueError("Invalid dataset index")
 
 # Paramaters for Shi-Tomasi corners
-feature_params = dict( maxCorners = 150,
-                       qualityLevel = 0.05,
-                       minDistance = 5,
-                       blockSize = 7 )
+if DATASET == 0: 
+    feature_params = dict( maxCorners = 150,
+                        qualityLevel = 0.05,
+                        minDistance = 5,
+                        blockSize = 7)
 
-# Parameters for LKT
-lk_params = dict( winSize  = (21, 21),
-                  maxLevel = 2,
-                  criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+    # Parameters for LKT
+    lk_params = dict( winSize  = (21, 21),
+                    maxLevel = 2,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+    
+    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    new_feature_min_squared_diff = 5
 
-# min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-new_feature_min_squared_diff = 5
+elif DATASET == 1: 
+    feature_params = dict( maxCorners = 100,
+                        qualityLevel = 0.07,
+                        minDistance = 3,
+                        blockSize = 7 )
+
+    # Parameters for LKT
+    lk_params = dict( winSize  = (21, 21),
+                    maxLevel = 2,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    new_feature_min_squared_diff = 4
+
 
 
 # Next keyframe to use for bootstrapping
@@ -101,8 +117,12 @@ class VO_Params():
     k: np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    abs_eig_min: float =1e-2
     # ADD NEW PARAMS HERE
-    alpha: float = 0.02
+    if DATASET == 0: 
+        alpha: float = 0.02
+    elif DATASET == 1: 
+        alpha :float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
         self.bs_kf_1 = bs_kf_1
@@ -113,6 +133,7 @@ class VO_Params():
         self.k = k
         self.start_idx = start_idx
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
+        
         # ADD NEW PARAMS HERE
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
@@ -377,7 +398,7 @@ class Pipeline():
             flags=cv2.SOLVEPNP_EPNP,
             reprojectionError=5.0,
             confidence=0.99,
-            iterationsCount=120
+            iterationsCount=100
         )
 
         if not success:
@@ -387,13 +408,6 @@ class Pipeline():
         # r_vec needs to be converted into a 3x3
         R, _ = cv2.Rodrigues(r_vec)    
         T_w2c = np.hstack((R, t_vec))
-        
-        # must be double check for consistency with other parts of the code that use T
-        # R_c2w = R.T
-        # t_c2w = -R.T @ t_vec
-        # T_c2w = np.hstack((R_c2w, t_c2w)) 
-
-
         # now, inliers are the indices in pts_2d and pts_3d corresponding to the inliers; it is a 2D since openCV returns it as such, so we need to convert it in a 1D array to use np features
         inliers_idx = inliers_idx.flatten()
         new_state = state.copy()
@@ -491,7 +505,7 @@ class Pipeline():
             
             # convert back to 3D
             points_3d = (points_homo[:3, :]/points_homo[3, :]) #(3,k)
-            valid_3d_pts, mask = self.chierality_check(points_3d, c_1_pose, cur_pose ) #(3,j)
+            valid_3d_pts, mask = self.cheirality_check(points_3d, c_1_pose, cur_pose ) #(3,j)
 
             pixel_coords = valid_pts_2[:, mask].T  #(j,2)
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (j,1,2)
@@ -505,7 +519,7 @@ class Pipeline():
         
         return state
 
-    def chierality_check(self, points_3d, Pi_1, Pi_2): 
+    def cheirality_check(self, points_3d, Pi_1, Pi_2): 
         """
         Checks whether the newly triangulated points are in front of both cameras
 
@@ -539,16 +553,30 @@ class Pipeline():
             potential_kp_candidates (np.ndarray): (N, 1, 2) float32 corners for KLT tracking.
         """
         potential_kp_candidates = np.empty((0, 1, 2), dtype=np.float32)
+        eig = cv2.cornerMinEigenVal(img_grayscale, blockSize=7, ksize=3)
         for n, mask in enumerate(self.params.feature_masks):
+            
+            # Shi–Tomasi corner detector: use a threshold on the minimum eigenvalue to avoid low texture regions
+            eig_roi = eig[mask > 0]
+            if eig_roi.size == 0:
+                continue
+
+            # if even the best corner in the ROI is too weak -> return nothing
+            if float(eig_roi.max()) < self.params.abs_eig_min:
+                continue
+            
             features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params)
+            
             # If no corners are found in this region, skip it
             if features is None: 
                 print(f"No features found for mask {n+1}!")
                 continue
+            
             # Warn if very few features were found in this region (not necessarily an error)
             if features.shape[0] < 10:
                 #print(f"Only {features.shape[0]} features found for mask {n+1}!")
                 pass
+            
             potential_kp_candidates = np.vstack((potential_kp_candidates, features))
         
         return potential_kp_candidates
@@ -616,7 +644,7 @@ class Pipeline():
         fig, (ax_global, ax_local) = plt.subplots(1, 2, figsize=(14, 6))
 
         # ---------- GLOBAL TRAJECTORY ----------
-        if DATASET in [0, 2]:
+        if DATASET in [0, 2] and gt_path is not None:
             x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
             points = np.stack((x_gt, y_gt), axis=1)
             ax_global.plot(points[:, 0], points[:, 1], color="gray", lw=2, label="GT")
@@ -652,7 +680,10 @@ class Pipeline():
         ax_local.axis("equal")
         ax_local.grid(True)
         ax_local.legend()
-
+        # start zoomed-out on the global plot
+        ax_global.set_aspect("equal", adjustable="box")
+        ax_global.set_xlim(-50, 50)
+        ax_global.set_ylim(-50, 50)
         plt.tight_layout()
         plt.show()
 
@@ -677,12 +708,44 @@ class Pipeline():
         pts3d: np.ndarray,
         n_keypoints: int,
     ):
-        # ---------- GLOBAL ----------
+        # ---------- GLOBAL (SLIDING WINDOW) ----------
         x, y = est_path[:, 0], est_path[:, 1]
-        plot_state["est_line"].set_data(x, y)
-        plot_state["est_point"].set_data([x[-1]], [y[-1]])
 
-        x0, y0 = x[-1], y[-1]
+        # show only last kG poses on the global axis
+        kG = min(1000, len(x))          # choose window length
+        xg = x[-kG:]
+        yg = y[-kG:]
+
+        plot_state["est_line"].set_data(xg, yg)
+        plot_state["est_point"].set_data([xg[-1]], [yg[-1]])
+
+        # heading arrow at current pose
+        x0, y0 = xg[-1], yg[-1]
+        L = plot_state["arrow_len"]
+        plot_state["heading_arrow"].set_positions(
+            (x0, y0),
+            (x0 + L * np.cos(theta), y0 + L * np.sin(theta))
+        )
+
+        # set visible window (margin in meters)
+        axg = plot_state["ax_global"]
+        
+        axg = plot_state["ax_global"]
+
+        margin = 10.0
+        min_span = 80.0   # <- ensures you start zoomed-out (meters)
+
+        xmin, xmax = float(np.min(xg)), float(np.max(xg))
+        ymin, ymax = float(np.min(yg)), float(np.max(yg))
+
+        # current pose
+        cxg, cyg = float(xg[-1]), float(yg[-1])
+
+        span_x = max(min_span, (xmax - xmin) + 2 * margin)
+        span_y = max(min_span, (ymax - ymin) + 2 * margin)
+
+        axg.set_xlim(cxg - span_x / 2, cxg + span_x / 2)
+        axg.set_ylim(cyg - span_y / 2, cyg + span_y / 2)
         L = plot_state["arrow_len"]
         plot_state["heading_arrow"].set_positions(
             (x0, y0),
