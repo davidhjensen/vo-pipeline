@@ -69,16 +69,16 @@ else:
 if DATASET == 0: 
     feature_params = dict( maxCorners = 60,
                         qualityLevel = 0.01,
-                        minDistance = 13,
+                        minDistance = 10,
                         blockSize = 7)
 
     # Parameters for LKT
     lk_params = dict( winSize  = (21, 21),
-                    maxLevel = 4,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+                    maxLevel = 2,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
     
     # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 5
+    new_feature_min_squared_diff = 4
 
 elif DATASET == 1: 
     feature_params = dict( maxCorners = 100,
