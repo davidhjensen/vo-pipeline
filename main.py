@@ -60,7 +60,7 @@ elif DATASET == 2:
 elif DATASET == 3:
     # Own Dataset
     # TODO: define your own dataset and load K obtained from calibration of own camera
-    assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
+    assert 'own_dataset_path' in locals(), "You must define VAMR_Rome_dataset"
     img_dir=os.path.join(own_dataset_path, 'images')
     images = sorted(glob(os.path.join(img_dir, '*.png')))
     last_frame = len(images)
