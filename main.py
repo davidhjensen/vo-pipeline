@@ -9,7 +9,7 @@ import scipy
 
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 0
+DATASET = 2
 
 # Define dataset paths
 # (Set these variables before running)
@@ -101,6 +101,21 @@ elif DATASET == 1:
     rows_roi_corners = 3
     cols_roi_corners = 3
 
+elif DATASET == 2: 
+    feature_params = dict( maxCorners = 300,
+                        qualityLevel = 0.03,
+                        minDistance = 8,
+                        blockSize = 7 )
+
+    # Parameters for LKT
+    lk_params = dict( winSize  = (31, 31),
+                    maxLevel = 4,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    new_feature_min_squared_diff = 4
+    rows_roi_corners = 3
+    cols_roi_corners = 3
+
 elif DATASET == 3: 
     feature_params = dict( maxCorners = 60,
                         qualityLevel = 0.05,
@@ -149,6 +164,8 @@ class VO_Params():
         alpha: float = 0.02
     elif DATASET == 1: 
         alpha :float = 0.02
+    elif DATASET == 2: 
+        alpha :float = 0.05
     elif DATASET == 3: 
         alpha :float = 0.02
 
