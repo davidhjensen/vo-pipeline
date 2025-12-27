@@ -1,11 +1,13 @@
 import os
 from glob import glob
 
-from typing import Tuple, Dict
+from typing import Tuple
 
 import cv2
 import numpy as np
 import scipy
+from scipy.optimize import least_squares
+from collections import deque
 
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
@@ -85,6 +87,7 @@ if DATASET == 0:
     new_feature_min_squared_diff = 4
     rows_roi_corners = 3
     cols_roi_corners = 3
+    window_size = 10
 
 elif DATASET == 1: 
     feature_params = dict( maxCorners = 60,
@@ -100,6 +103,25 @@ elif DATASET == 1:
     new_feature_min_squared_diff = 4
     rows_roi_corners = 3
     cols_roi_corners = 3
+    window_size = 10
+    
+# TODO tune this dataset correctly the following code is just a dummy placeholder block
+elif DATASET == 2: 
+    feature_params = dict( maxCorners = 60,
+                        qualityLevel = 0.05,
+                        minDistance = 10,
+                        blockSize = 9 )
+
+    # Parameters for LKT
+    lk_params = dict( winSize  = (21, 21),
+                    maxLevel = 2,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+    new_feature_min_squared_diff = 4
+    rows_roi_corners = 3
+    cols_roi_corners = 3
+    window_size = 10
+
 
 elif DATASET == 3: 
     feature_params = dict( maxCorners = 60,
@@ -114,6 +136,7 @@ elif DATASET == 3:
     new_feature_min_squared_diff = 4
     rows_roi_corners = 3
     cols_roi_corners = 3
+    window_size = 10
 
 
 # Next keyframe to use for bootstrapping
@@ -130,29 +153,32 @@ CUSTOM_ST_ROWS, CUSTOM_ST_COLS, CUSTOM_NUM_FEATURES = 2, 4, 20
 
 
 class VO_Params():
-    bs_kf_1: str # path to first keyframe used for bootstrapping dataset
-    bs_kf_2: str # path to second keyframe used for bootstrapping dataset
-    feature_masks: list[np.ndarray] # mask image into regions for feature tracking 
-    shi_tomasi_params: dict
-    klt_params: dict
-    k: np.ndarray # camera intrinsics matrix
+    bs_kf_1 : str # path to first keyframe used for bootstrapping dataset
+    bs_kf_2 : str # path to second keyframe used for bootstrapping dataset
+    feature_masks : list[np.ndarray] # mask image into regions for feature tracking 
+    shi_tomasi_params : dict
+    klt_params : dict
+    k : np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    rows_roi_corners :int
-    cols_roi_corners :int
-    abs_eig_min: float =1e-2
+    rows_roi_corners : int
+    cols_roi_corners : int
+    abs_eig_min : float = 1e-2
+    use_sliding_BA : bool = False
     
     
     # ADD NEW PARAMS HERE
-
+    # NOTE if they are all the same just avoid all this block of code
     if DATASET == 0: 
-        alpha: float = 0.02
+        alpha : float = 0.02
     elif DATASET == 1: 
-        alpha :float = 0.02
+        alpha : float = 0.02
+    elif DATASET == 2:
+        alpha : float = 0.02
     elif DATASET == 3: 
-        alpha :float = 0.02
+        alpha : float = 0.02
 
-    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
+    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, use_sliding_BA, window_size):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
         self.feature_masks = self.get_feature_masks(bs_kf_1, rows_roi_corners, cols_roi_corners)
@@ -163,6 +189,8 @@ class VO_Params():
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
         self.rows_roi_corners = rows_roi_corners
         self.cols_roi_corners = cols_roi_corners
+        self.use_sliding_BA = use_sliding_BA
+        self.window_size = window_size
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -219,7 +247,6 @@ elif DATASET == 2:
 
 elif DATASET == 3:
     # Own Dataset
-    # TODO: define your own dataset and load K obtained from calibration of own camera
     assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
     bs_kf_1 = images[0]
     bs_kf_2 = images[CUSTOM_BS_KF]
@@ -229,17 +256,17 @@ elif DATASET == 3:
 else:
     raise ValueError("Invalid dataset index")
 
-# ADD NEW PARAMS HERE TO THE INIT
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff)
+
+# The following boolean is to activate or de-activate the BA feature
+use_sliding_BA : bool = False
+params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, use_sliding_BA, window_size)
 class Pipeline():
 
     params: VO_Params
 
     def __init__(self, params: VO_Params):
-
         self.params = params
 
-        return
     
     def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
         """
@@ -317,6 +344,16 @@ class Pipeline():
         return initial_points[still_detected], points[still_detected]
 
     def findRelativePose(self, points1, points2):
+        """
+        Step 3 (Initialization): estimate the relative pose between the two bootstrap keyframes using the 8-point algorithm with RANSAC.
+        Args:
+            points1 (np.ndarray): (N,1,2) keypoints in bs_kf_1.
+            points2 (np.ndarray): (N,1,2) corresponding keypoints in bs_kf_2.
+        Returns:
+            np.ndarray: (3,4) relative pose [R|t] from bs_kf_1 to bs_kf_2.
+            np.ndarray: (M,1,2) inlier keypoints in bs_kf_1.
+            np.ndarray: (M,1,2) inlier keypoints in bs_kf_2.
+        """
         #F mat using ransac
         fundamental_matrix, inliers =cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
 
@@ -379,6 +416,17 @@ class Pipeline():
         S["F"] = np.empty_like(S["C"])
         S["T"] = np.empty((0,12))
 
+        if self.params.use_sliding_BA:
+            # only created if we are using BA
+            S["P_history"] = deque(maxlen=self.params.window_size)
+            S["P_history"].append(P_i)   # this is a list of kx1x2 keypoints
+            
+            S["X_history"] = deque(maxlen=self.params.window_size)
+            S["X_history"].append(X_i)
+            
+            S["pose_history"] = deque(maxlen=self.params.window_size)
+            S["pose_history"].append(np.hstack(np.eye(3,3), np.zeros(3,1))) # frame zero
+            # should I also add frame 2 using the estimated pose we got earlier?
         return S
 
     def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
@@ -394,7 +442,6 @@ class Pipeline():
             np.ndarray: keypoints from the previous frame that were successfully tracked forward
             np.ndarray: candidate keypoints from the previous frame that were successfully tracked forward
         """
-        # NOTE: might make sense to replace assert with ifs since maybe even if we have no points nor candidates we still want to return them empty again
         # FIRST WE TRACK "ESTABILISHED KEYPOINTS"
         points_2D = self.as_lk_points(state["P"])
         assert points_2D.shape[0] > 0, "There are no keypoints here, we can't track them forward"    
@@ -406,6 +453,9 @@ class Pipeline():
         state["P"] = current_points[status == 1]
         state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
         
+        if self.params.use_sliding_BA:
+            state["P_history"].append(state["P"])  # append the new keypoints
+            state["X_history"].append(state["X"])
 
         # THEN WE TRACK CANDIDATES - but in the first frame there are no candidates to track other than the established points
         # Therefore 
@@ -467,6 +517,9 @@ class Pipeline():
         # by doing the following thing the idea is that we are only keeping the inliers
         new_state["P"] = state["P"][inliers_idx]
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
+        
+        if self.params.use_sliding_BA:
+            new_state["pose_estimate"].append(T_w2c)
 
         return new_state, T_w2c, inliers_idx
     
@@ -628,28 +681,6 @@ class Pipeline():
         
         return potential_kp_candidates
 
-    def keypoints2set(keypoints: np.ndarray) -> set:
-        """Convert numpy keypoint list [k x 1 x 2] to a set of keypoints
-
-        Args:
-            keypoints (np.ndarray): keypoint array
-
-        Returns:
-            set: keypoint set
-        """
-        return set([(row[0][0], row[0][1]) for row in keypoints.tolist()])
-
-    def set2keypoints(keypoint_set: set) -> np.ndarray:
-        """Convert keypoint set (u, v) to a numpy array [k x 1 x 2]
-
-        Args:
-            keypoint_set (set): keypoint set
-
-        Returns:
-            np.ndarray: keypoint array with shape [k x 1 x 2]
-        """
-        return np.array([[[keypoint[0], keypoint[1]]] for keypoint in keypoint_set])
-
     def addNewFeatures(self, S: dict, potential_candidate_features: np.ndarray, cur_pose: np.ndarray) -> dict:
         """Given an array of features, update S with featurees that are not already being tracked
 
@@ -699,6 +730,116 @@ class Pipeline():
             x = x[:, None, :]
 
         return np.ascontiguousarray(x, dtype=np.float32)
+    
+
+
+    def sliding_window_refinement(self, S):
+        """
+        """
+        if not self.params.use_sliding_BA: return S        
+
+        window_keypoints = S["P_history"]
+        window_landmarks = S["X_history"]
+        pass
+        
+    
+    def compute_rep_err(self, x_vec, window_frames, obs_map):
+        """
+        Compute reprojection error for sliding window bundle adjustment
+        Args:
+            x_vec: 1D array of optimized parameters [poses_params, landmark_params]
+            obs_map: A dictionary mapping point_id to its 2D observations in the window
+        Returns:
+            residuals: 1D array of reprojection errors
+        """
+        # 1. Unpack x_vec into poses and 3D landmarks
+        poses, landmarks = self.unpack_params(x_vec, window_frames)
+        residuals = []
+
+        for f_id in window_frames:
+            pose = poses[f_id]
+            # Get only landmarks visible in this specific frame
+            visible_ids = obs_map[f_id]['ids']
+            observed_pixels = obs_map[f_id]['pixels']
+            
+            # Project our current estimate of these landmarks
+            projected = self.project_points(landmarks[:, visible_ids], pose)
+            
+            # Calculate distance between observation and projection
+            err = (observed_pixels - projected).flatten()
+            residuals.append(err)
+
+        return np.concatenate(residuals)
+    
+    def project_points(self, X, T):
+        """
+        Projects 3D points X into camera with pose T
+        Args:
+            X: (3, K) landmark coordinates
+            T: (3, 4) camera pose [R|t]
+        Returns:
+            pixels: (K, 2) projected pixel coordinates
+        """
+        # Transform to camera frame
+        X_hom = np.vstack((X, np.ones(X.shape[1])))
+        P_cam = T @ X_hom # (3, K)
+        
+        # Project to image plane
+        P_img = self.params.k @ P_cam
+        
+        # Points with Z <= 0 are behind the camera; we'll handle those in the residual
+        pixels = P_img[:2] / P_img[2]
+        return pixels.T # (K, 2)
+    
+
+    def pack_params(self, window_poses, window_landmarks):
+        """
+        Packs the window poses and landmarks into a single parameter vector for optimization.
+        Args:
+            window_poses: List of (3, 4) matrices in the sliding window
+            window_landmarks: (3, M) matrix of landmarks optimized in this window
+        Returns:
+            x_vec: 1D array of packed parameters
+        """
+        # We skip the first pose in the window to anchor the map (gauge freedom)
+        pose_params = []
+        for i in range(1, len(window_poses)):
+            R = window_poses[i][:, :3]
+            t = window_poses[i][:, 3]
+            rvec, _ = cv2.Rodrigues(R)
+            pose_params.append(np.hstack((rvec.flatten(), t.flatten())))
+        
+        # Flatten landmarks (3 * M)
+        landmark_params = window_landmarks.flatten()
+        
+        return np.concatenate((*pose_params, landmark_params))
+
+    def unpack_params(self, x_vec, window_poses, n_landmarks):
+        """
+        Unpacks the x_vec back into structured poses and landmarks.
+        Args:
+            x_vec: 1D array of packed parameters
+            window_poses: List of (3, 4) matrices in the sliding window
+            n_landmarks: Number of landmarks
+        Returns:
+            poses: Dictionary mapping frame index to (3, 4) pose matrix
+        """
+        n_active_poses = len(window_poses) - 1
+        poses = {0: window_poses[0]} # Fix the first pose as the anchor
+        
+        # Extract poses
+        for i in range(n_active_poses):
+            idx = i * 6
+            rvec = x_vec[idx:idx+3]
+            t = x_vec[idx+3:idx+6]
+            R, _ = cv2.Rodrigues(rvec)
+            poses[i+1] = np.hstack((R, t.reshape(3, 1)))
+            
+        # Extract landmarks
+        l_start = n_active_poses * 6
+        landmarks = x_vec[l_start:].reshape(3, n_landmarks)
+        
+        return poses, landmarks
     
 
 
