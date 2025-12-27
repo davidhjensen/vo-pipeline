@@ -7,10 +7,6 @@ import cv2
 import numpy as np
 import scipy
 
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
-from matplotlib.patches import FancyArrowPatch
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
 DATASET = 3
@@ -59,8 +55,7 @@ elif DATASET == 2:
     
 elif DATASET == 3:
     # Own Dataset
-    # TODO: define your own dataset and load K obtained from calibration of own camera
-    assert 'own_dataset_path' in locals(), "You must define VAMR_Rome_dataset"
+    assert 'own_dataset_path' in locals(), "You must define VAMR_Rome_dataset_path"
     img_dir=os.path.join(own_dataset_path, 'images')
     images = sorted(glob(os.path.join(img_dir, '*.png')))
     last_frame = len(images)
