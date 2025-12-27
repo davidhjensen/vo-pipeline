@@ -9,14 +9,14 @@ import scipy
 
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 3
+DATASET = 0
 
 # Define dataset paths
 # (Set these variables before running)
 kitti_path = "kitti/kitti05/kitti"
 malaga_path = "malaga/malaga-urban-dataset-extract-07"
 parking_path = "parking/parking"
-own_dataset_path = "VAMR_Rome_dataset"
+own_dataset_path = "VAMR_Rome_dataset/VAMR_Rome_dataset"
 
 if DATASET == 0:
     assert 'kitti_path' in locals(), "You must define kitti_path"
@@ -71,20 +71,20 @@ else:
 
 # Paramaters for Shi-Tomasi corners
 if DATASET == 0: 
-    feature_params = dict( maxCorners = 60,
+    feature_params = dict( maxCorners = 50,
                         qualityLevel = 0.01,
                         minDistance = 10,
                         blockSize = 7)
 
     # Parameters for LKT
     lk_params = dict( winSize  = (21, 21),
-                    maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+                    maxLevel = 3,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
     
     # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     new_feature_min_squared_diff = 4
-    rows_roi_corners = 2
-    cols_roi_corners = 4
+    rows_roi_corners = 3
+    cols_roi_corners = 3
 
 elif DATASET == 1: 
     feature_params = dict( maxCorners = 60,
@@ -161,6 +161,8 @@ class VO_Params():
         self.k = k
         self.start_idx = start_idx
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
+        self.rows_roi_corners = rows_roi_corners
+        self.cols_roi_corners = cols_roi_corners
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -192,6 +194,7 @@ class VO_Params():
                 masks.append(mask)
 
         return masks
+    
 
 if DATASET == 0:
     assert 'kitti_path' in locals(), "You must define kitti_path"
@@ -237,6 +240,31 @@ class Pipeline():
         self.params = params
 
         return
+    
+    def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
+        """
+        Return the index of the grid mask containing pixel (u, v).
+
+        Masks are ordered left-to-right, top-to-bottom.
+
+        Args:
+            u (int): pixel column (x)
+            v (int): pixel row (y)
+            H (int): image height
+            W (int): image width
+            rows (int): number of grid rows
+            cols (int): number of grid columns
+
+        Returns:
+            int: index of the corresponding mask
+        """
+        cell_h = H / rows
+        cell_w = W / cols
+
+        row_idx = min(int(v // cell_h), rows - 1)
+        col_idx = min(int(u // cell_w), cols - 1)
+
+        return row_idx * cols + col_idx
 
     def extractFeaturesBootstrap(self):
         """
@@ -701,7 +729,7 @@ last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
 first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
 
 total_frames = last_frame - params.start_idx
-plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames)
+plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
 
 R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]

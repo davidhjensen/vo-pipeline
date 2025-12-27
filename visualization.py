@@ -11,6 +11,8 @@ def initTrajectoryPlot(
     arrow_len: float = 0.3,
     first_flow_bgr: np.ndarray | None = None,
     total_frames: int | None = None,
+    rows: int = 3,
+    cols: int=3
 ):
     plt.ion()
     fig = plt.figure(figsize=(18, 10))
@@ -78,6 +80,22 @@ def initTrajectoryPlot(
     ax_flow.set_xlim(0, W)
     ax_flow.set_ylim(H, 0)
 
+    # ---------- GRID DIVIDERS (ROWS / COLS) ---------
+    row_bounds = np.linspace(0, H, rows + 1)
+    col_bounds = np.linspace(0, W, cols + 1)
+
+    grid_lines = []
+
+    # horizontal lines
+    for r in row_bounds:
+        ln, = ax_flow.plot([0, W], [r, r], color="yellow", lw=1, alpha=0.6)
+        grid_lines.append(ln)
+
+    # vertical lines
+    for c in col_bounds:
+        ln, = ax_flow.plot([c, c], [0, H], color="yellow", lw=1, alpha=0.6)
+        grid_lines.append(ln)
+
     # ---------- KEYPOINTS OVER TIME ----------
     kp_line, = ax_kp.plot([], [], "-o", ms=3, lw=2, label="Tracked (P)")
     inl_line, = ax_kp.plot([], [], "-o", ms=3, lw=2, label="Inliers (PnP)")
@@ -116,6 +134,9 @@ def initTrajectoryPlot(
         # global bounds that expand only when needed
         "gxlim": list(ax_global.get_xlim()),
         "gylim": list(ax_global.get_ylim()),
+        "grid_lines": grid_lines,
+        "grid_rows": rows,
+        "grid_cols": cols,
     }
 
 
