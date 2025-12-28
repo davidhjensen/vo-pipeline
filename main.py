@@ -507,7 +507,7 @@ class Pipeline():
 
         if not success:
             print("Pose estimation failed")
-            return ({}, np.zeros((3,4))) # maybe we could raise an error instead of returning this
+            return ({}, np.zeros((3,4)), np.empty((0,0))) # maybe we could raise an error instead of returning this
         
         # r_vec needs to be converted into a 3x3
         R, _ = cv2.Rodrigues(r_vec)    
@@ -740,29 +740,45 @@ class Pipeline():
         active_ids = S["ids"]
         id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
         n_landmarks = len(active_ids)
+        
         window_poses = list(S["pose_history"])
+        window_frames = list(range(len(window_poses)))  # indices of frames in the window
+        
+        active_ids = S["ids"]
+        id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
+        n_landmarks = len(active_ids)
         
         # Build a flat list of all 2D observations in the window
-        obs_list = [] # List of (pose_index, landmark_index)
-        obs_pixels = []
+        obs_map = {}  # (frame_idx, landmark_idx) -> pixel (u, v)
         
         for f_idx, (pixels, ids) in enumerate(S["P_history"]):
-            for p, id_ in zip(pixels, ids):
-                if id_ in id_to_idx:
-                    obs_list.append((f_idx, id_to_idx[id_]))
-                    obs_pixels.append(p[0]) # Extract (u, v)
+            local_ids = []
+            local_pixels = []
+            for p, pt_id in zip(pixels, ids):
+                if pt_id in id_to_idx:
+                    local_ids.append(id_to_idx[pt_id])
+                    local_pixels.append(p[0]) # Extract (u, v)
+            
+            # Fill the dictionary for this frame
+            obs_map[f_idx] = {
+                'ids': np.array(local_ids),
+                'pixels': np.array(local_pixels)
+            }
         
-        obs_pixels = np.array(obs_pixels)
-
+        obs_list_for_sparsity = []
+        for f_idx, data in obs_map.items():
+            for l_idx in data['ids']:
+                obs_list_for_sparsity.append((f_idx, l_idx))
+                
         # Pack variables and Sparsity Mask
         x0 = pack_params(window_poses, S["X"])
-        A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list)  # needed for scipy least square
+        A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list_for_sparsity)  # needed for scipy least square
 
         # Huber norm is used to ignore KLT tracking outliers
         res = least_squares(
             compute_rep_err, x0, 
             jac_sparsity=A,
-            args=(len(window_poses), n_landmarks, obs_list, obs_pixels),
+            args=(window_poses, n_landmarks, obs_map, self.params.k),
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
 

@@ -49,7 +49,7 @@ def build_window_data(S: dict) -> tuple[int, list[tuple[int, int]], np.ndarray]:
 
 
 
-def compute_rep_err(x_vec, window_poses, n_landmarks, obs_map, k):
+def compute_rep_err(x_vec, window_poses: list, n_landmarks: int, obs_map: dict, k: np.ndarray) -> np.ndarray:
     """
     Args:
         x_vec: parameters optimized by the solver
