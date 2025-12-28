@@ -22,13 +22,6 @@ MALAGA_BS_KF = 5
 PARKING_BS_KF = 3
 CUSTOM_BS_KF = 5
 
-# Number of rows and columns to divide image into for feature detection and number of features to track in each cell
-KITTI_ST_ROWS, KITTI_ST_COLS, KITTI_NUM_FEATURES = 2, 4, 20
-MALAGA_ST_ROWS, MALAGA_ST_COLS, MALAGA_NUM_FEATURES = 2, 4, 20
-PARKING_ST_ROWS, PARKING_ST_COLS, PARKING_NUM_FEATURES = 2, 4, 20
-CUSTOM_ST_ROWS, CUSTOM_ST_COLS, CUSTOM_NUM_FEATURES = 2, 4, 20
-
-
 # Define dataset paths
 # (Set these variables before running)
 kitti_path = "kitti/kitti05/kitti"
@@ -48,9 +41,8 @@ if DATASET == 0:
     ])
     ground_truth = np.loadtxt(os.path.join(kitti_path, 'poses', '05.txt'))
     ground_truth = ground_truth[:, [-9, -1]]  # same as MATLAB(:, [end-8 end])
-    
 
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+##------------------PARAMETERS FOR KITTI------------------##
     # Shi-Tomasi corner parameters
     feature_params = dict(  maxCorners = 50,
                             qualityLevel = 0.01,
@@ -74,6 +66,7 @@ if DATASET == 0:
     
     # Bundle adjustment parameters
     window_size = 10
+##------------------------------------------------------##
 
 elif DATASET == 1:
     assert 'malaga_path' in locals(), "You must define malaga_path"
@@ -87,7 +80,8 @@ elif DATASET == 1:
         [0, 0, 1]
     ])
     ground_truth = None
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+
+##------------------PARAMETERS FOR MALAGA------------------##
     # Shi-Tomasi corner parameters
     feature_params = dict(  maxCorners = 60,
                             qualityLevel = 0.05,
@@ -110,7 +104,8 @@ elif DATASET == 1:
     
     # Bundle adjustment parameters
     window_size = 10
-    
+##------------------------------------------------------##
+
 elif DATASET == 2:
     assert 'parking_path' in locals(), "You must define parking_path"
     img_dir = os.path.join(parking_path, 'images')
@@ -120,7 +115,7 @@ elif DATASET == 2:
     ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
     ground_truth = ground_truth[:, [-9, -1]]
     
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+##------------------PARAMETERS FOR PARKING------------------##
     # Shi-Tomasi corner parameters    
     # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
     feature_params = dict(  maxCorners = 60,
@@ -144,7 +139,8 @@ elif DATASET == 2:
     
     # Bundle adjustment parameters
     window_size = 10
-    
+##------------------------------------------------------##
+
 elif DATASET == 3:
     # Own Dataset
     assert 'own_dataset_path' in locals(), "You must define VAMR_Rome_dataset_path"
@@ -158,7 +154,7 @@ elif DATASET == 3:
     ])
     ground_truth = None
     
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+##------------------PARAMETERS FOR CUSTOM------------------##
     # Shi-Tomasi corner parameters    
     feature_params = dict(  maxCorners = 60,
                             qualityLevel = 0.05,
@@ -180,35 +176,24 @@ elif DATASET == 3:
     
     # Bundle adjustment parameters
     window_size = 10
-    
+##------------------------------------------------------##
+
 else:
     raise ValueError("Invalid dataset index")
-
-
 
 class VO_Params():
     bs_kf_1 : str # path to first keyframe used for bootstrapping dataset
     bs_kf_2 : str # path to second keyframe used for bootstrapping dataset
+    rows_roi_corners : int # number of rows to split image into for feature detection
+    cols_roi_corners : int # number of cols to split image into for feature detection
     feature_masks : list[np.ndarray] # mask image into regions for feature tracking 
-    shi_tomasi_params : dict
-    klt_params : dict
+    shi_tomasi_params : dict # cv2 parameters for Shi-Tomasi corners
+    klt_params : dict # cv2 parameters for KLT tracking
     k : np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    rows_roi_corners : int
-    cols_roi_corners : int
-    abs_eig_min : float = 1e-2    
+    abs_eig_min : float = 1e-2 
     alpha : float = 0.02
-    
-    # NOTE if they are all the same just avoid all this block of code
-    # if DATASET == 0: 
-    #     alpha : float = 0.02
-    # elif DATASET == 1: 
-    #     alpha : float = 0.02
-    # elif DATASET == 2:
-    #     alpha : float = 0.02
-    # elif DATASET == 3: 
-    #     alpha : float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
         self.bs_kf_1 = bs_kf_1
@@ -254,8 +239,6 @@ class VO_Params():
 
         return masks
 
-
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
 class Pipeline():
 
     params: VO_Params
@@ -724,7 +707,7 @@ class Pipeline():
         return S_new
     
 
-    def sliding_window_refinement(self, S: dict) -> dict:
+    def slidingWindowRefinement(self, S: dict) -> dict:
         """
         Perform sliding window bundle adjustment to refine camera poses and 3D landmarks in the current window.
         Args:
@@ -815,9 +798,10 @@ class Pipeline():
         S = pipeline.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
         return (S, homography)
     
+# create instance of parameters
+params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
 
-
-# Create instance of pipeline
+# create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
@@ -870,7 +854,7 @@ for i in range(params.start_idx + 1, last_frame):
     
     # perform sliding window bundle adjustment to refine pose and landmarks
     if use_sliding_window_BA:
-        S = pipeline.sliding_window_refinement(S)
+        S = pipeline.slidingWindowRefinement(S)
         pose = list(S["pose_history"])[-1]
 
     # plot inlier keypoints
