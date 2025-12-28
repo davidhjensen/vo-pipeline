@@ -27,7 +27,7 @@ def initTrajectoryPlot(
     # ---------- GLOBAL TRAJECTORY ----------
     if (gt_path is not None) and (len(gt_path) > 0):
         x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
-        #ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
+        ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
 
         # start centered around GT extents
         xmin, xmax = float(np.min(x_gt)), float(np.max(x_gt))
