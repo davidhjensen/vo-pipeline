@@ -49,30 +49,29 @@ def build_window_data(S: dict) -> tuple[int, list[tuple[int, int]], np.ndarray]:
 
 
 
-def compute_rep_err(x_vec: np.ndarray, window_frames: list, obs_map: dict) -> np.ndarray:
+def compute_rep_err(x_vec, window_poses, n_landmarks, obs_map, k):
     """
-    Compute reprojection error for sliding window bundle adjustment
     Args:
-        x_vec: 1D array of optimized parameters [poses_params, landmark_params]
-        window_frames: List of frame indices in the sliding window
-        obs_map: A dictionary mapping point_id to its 2D observations in the window
-    Returns:
-        residuals: 1D array of reprojection errors
+        x_vec: parameters optimized by the solver
+        window_poses: list of original (3,4) poses (for anchor/indexing)
+        n_landmarks: total unique landmarks in the window
+        obs_map: dict {frame_idx: {'ids': [...], 'pixels': [...]}}
+        k: camera matrix
     """
-    # Unpack x_vec into poses and 3D landmarks
-    poses, landmarks = unpack_params(x_vec, window_frames)
+    poses, landmarks = unpack_params(x_vec, window_poses, n_landmarks)
     residuals = []
 
-    for f_id in window_frames:
-        pose = poses[f_id]
-        # Get only landmarks visible in this specific frame
-        visible_ids = obs_map[f_id]['ids']
-        observed_pixels = obs_map[f_id]['pixels']
+    # Get the indices of frames in the current window (e.g., [0, 1, 2, 3, 4])
+    window_indices = sorted(obs_map.keys())
+
+    for f_idx in window_indices:
+        pose = poses[f_idx]
+        visible_ids = obs_map[f_idx]['ids']
+        observed_pixels = obs_map[f_idx]['pixels']
         
-        # Project our current estimate of these landmarks
-        projected = project_points(landmarks[:, visible_ids], pose)
+        projected = project_points(landmarks[:, visible_ids], pose, k)
         
-        # Calculate distance between observation and projection
+        # Error calculation
         err = (observed_pixels - projected).flatten()
         residuals.append(err)
 

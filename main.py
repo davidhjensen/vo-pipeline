@@ -198,9 +198,9 @@ class VO_Params():
     rows_roi_corners : int
     cols_roi_corners : int
     abs_eig_min : float = 1e-2    
+    alpha : float = 0.02
     
-    # ADD NEW PARAMS HERE
-    # NOTE if they are all the same just avoid all this block of code, removed to see if any error pops out
+    # NOTE if they are all the same just avoid all this block of code
     # if DATASET == 0: 
     #     alpha : float = 0.02
     # elif DATASET == 1: 
@@ -394,22 +394,30 @@ class Pipeline():
 
         return points_3d
 
-    def bootstrapState(self, P_1: np.ndarray, P_2: np.ndarray, X_i: np.ndarray, homography: np.ndarray) -> dict[str : np.ndarray]:
+    def bootstrapState(self, P_1: np.ndarray, P_2: np.ndarray, X_2: np.ndarray, homography: np.ndarray) -> dict[str : np.ndarray]:
         """
-        
+            Initializes the state after the previous steps.
+            Args:
+                P_1: keypoints in the original (first) frame
+                P_2: keypoints in the second frame selected for bootstrapping
+                X_i: current landmarks from the second frame
+                homography: relative transformation between first and second frame selected for bootstrapping
+            Returns:
+                dict: the state in the form of a dictionary where each state-string variable is the key to get the value
+                      e.g.: S["P"] returns the current frame 2D landmarks
         """
         S : dict[str : np.ndarray] = {}
-        assert P_2.shape[0] == X_i.shape[1], "2D keypoints number of rows should match the 3D keypoints number of columns"
+        assert P_2.shape[0] == X_2.shape[1], "2D keypoints number of rows should match the 3D keypoints number of columns"
         assert P_1.shape[0] == P_2.shape[0], "2D keypoints from frame 1 and 2 MUST be the same"
         
         S["P"] = P_2    # these are the "current" keypoints from frame 2    
-        S["X"] = X_i    
+        S["X"] = X_2    
         S["C"] = np.empty((0,1,2))
         S["F"] = np.empty_like(S["C"])
         S["T"] = np.empty((0,12))
 
         if self.use_sliding_BA:
-            n_pts = X_i.shape(1) # we get the landmark number
+            n_pts = X_2.shape[1] # we get the landmark number
             S["ids"] = np.arange(n_pts)     # initialize this as the range going from 0 to n_pts-1
             self.next_id = n_pts
             # only created if we are using BA
@@ -510,9 +518,9 @@ class Pipeline():
         # by doing the following thing the idea is that we are only keeping the inliers
         new_state["P"] = state["P"][inliers_idx]
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
-        new_state["ids"] = state["ids"][inliers_idx] # update also the "valid" indices
-        
+                
         if self.use_sliding_BA:
+            new_state["ids"] = state["ids"][inliers_idx] # update also the "valid" indices
             new_state["pose_history"].append(T_w2c)
 
         return new_state, T_w2c, inliers_idx
@@ -725,7 +733,7 @@ class Pipeline():
             dict: updated state with refined poses and landmarks.
         """
         # Check if BA is enabled and window is full, but we could also start when we have like 5 or 6 (that is a minimal change though, especially since drift grows with time, so if we start later it is ok)
-        if not self.params.use_sliding_BA or len(S["pose_history"]) < self.params.window_size:
+        if not self.use_sliding_BA or len(S["pose_history"]) < self.params.window_size:
             return S
 
         # We only optimize landmarks that are currently in our 'Established' set (S["X"])
@@ -752,7 +760,7 @@ class Pipeline():
 
         # Huber norm is used to ignore KLT tracking outliers
         res = least_squares(
-            compute_rep_err, x0, 
+            compute_rep_err(), x0, 
             jac_sparsity=A,
             args=(len(window_poses), n_landmarks, obs_list, obs_pixels),
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
@@ -798,7 +806,7 @@ class Pipeline():
 
 
 # Create instance of pipeline
-use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
 # generate initial state
@@ -834,6 +842,7 @@ for i in range(params.start_idx + 1, last_frame):
     # read in next image
     image_path = images[i]
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
     if image is None:
         print(f"Warning: could not read {image_path}")
         continue
@@ -846,6 +855,11 @@ for i in range(params.start_idx + 1, last_frame):
 
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
+    
+    # perform sliding window bundle adjustment to refine pose and landmarks
+    if use_sliding_window_BA:
+        S = pipeline.sliding_window_refinement(S)
+        pose = list(S["pose_history"])[-1]
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
@@ -868,16 +882,17 @@ for i in range(params.start_idx + 1, last_frame):
     est_path.append([t_wc[0], t_wc[2]])
     theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
     
-    updateTrajectoryPlot(
-        plot_state, 
-        np.asarray(est_path), 
-        theta, 
-        S["X"],
-        S["P"].shape[0], 
-        flow_bgr=img_to_show,
-        frame_idx=frame_counter,
-        n_inliers=n_inliers,
-    )
+    # updateTrajectoryPlot(
+    #     plot_state, 
+    #     np.asarray(est_path), 
+    #     theta, 
+    #     S["X"],
+    #     S["P"].shape[0], 
+    #     flow_bgr=img_to_show,
+    #     frame_idx=frame_counter,
+    #     n_inliers=n_inliers,
+    # )
+    
 
     # update last image
     last_image = image
@@ -889,5 +904,8 @@ for i in range(params.start_idx + 1, last_frame):
               f"#Candidates Tracked: {last_candidates.shape[0]}\n"
               f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
               f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
+    
+    cv2.imshow("tracking...", img_to_show)
+    cv2.waitKey(10)
 
 cv2.destroyAllWindows()

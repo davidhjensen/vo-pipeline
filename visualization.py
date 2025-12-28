@@ -68,11 +68,13 @@ def initTrajectoryPlot(
     ax_local.legend()
 
     # ---------- OPTICAL FLOW IMAGE ----------
-    if first_flow_bgr is None:
-        # fallback placeholder
-        first_flow_rgb = np.zeros((480, 640, 3), dtype=np.uint8)
-    else:
-        first_flow_rgb = cv2.cvtColor(first_flow_bgr, cv2.COLOR_BGR2RGB)
+    # if first_flow_bgr is None:
+    #     # fallback placeholder
+    #     first_flow_rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    # else:
+    #     first_flow_rgb = cv2.cvtColor(first_flow_bgr, cv2.COLOR_BGR2RGB)
+       
+    first_flow_rgb = cv2.cvtColor(first_flow_bgr, cv2.COLOR_BGR2RGB)
 
     flow_im = ax_flow.imshow(first_flow_rgb)
     ax_flow.set_axis_off()
@@ -209,8 +211,8 @@ def updateTrajectoryPlot(
     axl.set_ylim(cy - m, cy + m)
 
     # ---------- OPTICAL FLOW IMAGE ----------
-    if flow_bgr is not None:
-        plot_state["flow_im"].set_data(cv2.cvtColor(flow_bgr, cv2.COLOR_BGR2RGB))
+    # if flow_bgr is not None:
+    #     plot_state["flow_im"].set_data(cv2.cvtColor(flow_bgr, cv2.COLOR_BGR2RGB))
 
     # ---------- KEYPOINT TIME SERIES ----------
     if frame_idx is not None:
