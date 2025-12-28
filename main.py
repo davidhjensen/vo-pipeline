@@ -8,6 +8,7 @@ import numpy as np
 import scipy
 
 from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
+from utils import get_mask_indices, get_weighted_y
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
 DATASET = 0
 
@@ -163,6 +164,9 @@ class VO_Params():
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
         self.rows_roi_corners = rows_roi_corners
         self.cols_roi_corners = cols_roi_corners
+        
+        self.idx_ground = self.rows_roi_corners * self.cols_roi_corners -(np.floor(self.cols_roi_corners/2).astype(int)+1)
+        self.approx_car_height = 1.6
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -177,17 +181,17 @@ class VO_Params():
         """
         # get image shape
         img = cv2.imread(img_path)
-        H, W = img.shape[:2]
+        self.H, self.W = img.shape[:2]
 
         # get boundries of the cells
-        row_boundries = np.linspace(0, H, rows + 1, dtype=int)
-        col_boundries = np.linspace(0, W, cols + 1, dtype=int)
+        row_boundries = np.linspace(0, self.H, rows + 1, dtype=int)
+        col_boundries = np.linspace(0, self.W, cols + 1, dtype=int)
 
         # create masks left to right, top to bottom
         masks = []
         for row in range(rows):
             for col in range(cols):
-                mask = np.zeros((H, W), dtype="uint8")
+                mask = np.zeros((self.H, self.W), dtype="uint8")
                 r_s, r_e = row_boundries[[row, row + 1]]
                 c_s, c_e = col_boundries[[col, col + 1]]
                 mask[r_s:r_e, c_s:c_e] = 255
@@ -238,33 +242,9 @@ class Pipeline():
     def __init__(self, params: VO_Params):
 
         self.params = params
+        self.last_scale=1
 
         return
-    
-    def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
-        """
-        Return the index of the grid mask containing pixel (u, v).
-
-        Masks are ordered left-to-right, top-to-bottom.
-
-        Args:
-            u (int): pixel column (x)
-            v (int): pixel row (y)
-            H (int): image height
-            W (int): image width
-            rows (int): number of grid rows
-            cols (int): number of grid columns
-
-        Returns:
-            int: index of the corresponding mask
-        """
-        cell_h = H / rows
-        cell_w = W / cols
-
-        row_idx = min(int(v // cell_h), rows - 1)
-        col_idx = min(int(u // cell_w), cols - 1)
-
-        return row_idx * cols + col_idx
 
     def extractFeaturesBootstrap(self):
         """
@@ -346,18 +326,31 @@ class Pipeline():
         # projection matrices
         proj_1 = self.params.k @ np.hstack([np.eye(3), np.zeros((3,1))])
         proj_2 = self.params.k @ H
+
         
         # reshaping the points into 2xK
         p1 = points_1.reshape(-1,2).T
         p2 = points_2.reshape(-1,2).T
+        
+        idx_pts_1 = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners,p1.T)
+        idx_pts_2 = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners,p2.T)
 
+        equal_mask = (idx_pts_1 == idx_pts_2) & (idx_pts_1 == self.params.idx_ground)
+        gd_indices = np.where(equal_mask)[0]
         # triangulate homogeneous coordinates using DLT
         points_homo = cv2.triangulatePoints(proj_1, proj_2, p1, p2)
 
         # convert back to 3D
         points_3d = (points_homo[:3, :]/points_homo[3, :])
-
-        return points_3d
+        
+        scale=1
+        if len(gd_indices) >0:
+            gd_points = points_3d[:, gd_indices]
+            est_y = get_weighted_y(gd_points)
+            scale = self.params.approx_car_height/est_y
+            points_3d *= scale
+        
+        return points_3d, scale
 
     def bootstrapState(self, P_i: np.ndarray, X_i: np.ndarray) -> dict[str : np.ndarray]:
         """
@@ -547,6 +540,7 @@ class Pipeline():
         #Current projection matrix
         proj_2 = K @ cur_pose
         
+        valid_3d_pts_list = []
         for i, g in enumerate(groups):
 
             c_1_pose = unique_poses[i].reshape(3,4)
@@ -558,15 +552,18 @@ class Pipeline():
             # convert back to 3D
             points_3d = (points_homo[:3, :]/points_homo[3, :]) #(3,k)
             valid_3d_pts, mask = self.cheirality_check(points_3d, c_1_pose, cur_pose ) #(3,j)
-
+            
+            valid_3d_pts_list.append(valid_3d_pts)            
             pixel_coords = valid_pts_2[:, mask].T  #(j,2)
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (j,1,2)
             state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+j,1 ,2)
-            state["X"] = np.concatenate((state["X"], valid_3d_pts), axis = 1) #(3, n+j)
         
         #Update the candidate set removing the now triangulated points 
         state["C"] = pts_2D_cur[not_idx, None, :]
         state["F"] = pts_2D_first_obs[not_idx, None, :]
+                
+        triangulated_pts = np.concatenate(valid_3d_pts_list, axis=1)
+        state["X"] = np.concatenate((state["X"], triangulated_pts), axis = 1) #(3, n+j)
         state["T"] = first_poses_mat[not_idx, :]
         
         return state
@@ -614,10 +611,18 @@ class Pipeline():
                 continue
 
             # if even the best corner in the ROI is too weak -> return nothing
-            if float(eig_roi.max()) < self.params.abs_eig_min:
+            if (float(eig_roi.max()) < self.params.abs_eig_min) and n != self.params.idx_ground:
                 continue
-            
-            features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params)
+
+            if self.params.idx_ground  == n: 
+                feature_params = dict( maxCorners = 100,
+                                        qualityLevel = 0.005,
+                                        minDistance = 3,
+                                        blockSize = 5)
+                
+                features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **feature_params)
+            else:
+                features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params)
             
             # If no corners are found in this region, skip it
             if features is None: 
@@ -684,8 +689,131 @@ class Pipeline():
         S_new["F"] = np.vstack((S["F"], new_features))
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
         return S_new
-
     
+    def fit_ground_plane_ransac(
+        self,
+        pts: np.ndarray,
+        n_iters: int = 200,
+        dist_thresh: float = 0.05,
+        expected_normal: np.ndarray = np.array([0, -1, 0]), 
+        angle_thresh: float = 0.7, # Cosine similarity (approx 25 degrees)
+    ):
+        """
+        Fits a plane, that aligns with normal.
+        """
+        X = pts.T  # (N,3)
+        N = X.shape[0]
+        
+        # Need at least 3 points
+        if N < 3:
+            return np.array([0, 1, 0]), 0.0, np.zeros(N, dtype=bool)
+
+        best_inliers = np.zeros(N, dtype=bool)
+        best_count = 0
+        best_model = (np.array([0, -1, 0]), 0.0) # Default fallback
+
+        for _ in range(n_iters):
+            # 1. Sample
+            idx = np.random.choice(N, 3, replace=False)
+            p1, p2, p3 = X[idx]
+
+            # 2. Model
+            v1 = p2 - p1
+            v2 = p3 - p1
+            n = np.cross(v1, v2)
+            norm = np.linalg.norm(n)
+            if norm < 1e-6:
+                continue
+            n = n / norm
+
+            # Angle Constraint
+            # Check if normal is roughly parallel to UP vector
+            # abs() handles both Up and Down directions
+            if abs(np.dot(n, expected_normal)) < angle_thresh:
+                continue
+            d = -n @ p1
+
+            # 3. Evaluate
+            dists = np.abs(X @ n + d)
+            inliers = dists < dist_thresh
+            count = inliers.sum()
+
+            if count > best_count:
+                best_count = count
+                best_inliers = inliers
+                best_model = (n, d)
+
+        # If no valid plane found
+        if best_count < 3:
+            return best_model[0], best_model[1], best_inliers
+
+        # 4. Refinement 
+        X_in = X[best_inliers]
+        centroid = X_in.mean(axis=0)
+        # Centering improves numerical stability
+        _, _, Vt = np.linalg.svd(X_in - centroid)
+        n_refined = Vt[-1]
+        
+        # Ensure normal points in same direction as expected_normal (optional)
+        if np.dot(n_refined, expected_normal) < 0:
+            n_refined = -n_refined
+            
+        d_refined = -n_refined @ centroid
+
+        return n_refined, d_refined, best_inliers
+
+    def estimate_ground_height(self, pts_3d, cur_pose):
+        if pts_3d.shape[1] < 15:
+            return None
+
+        # Calculate median depth to scale threshold
+        d_ref = np.median(np.linalg.norm(pts_3d, axis=0))
+        
+        # Relaxed threshold slightly
+        dist_thresh = 0.03 * d_ref 
+
+        expected_up = np.array([0, 1, 0]) 
+
+        n, d, inliers = self.fit_ground_plane_ransac(
+            pts_3d, 
+            dist_thresh=dist_thresh,
+            expected_normal=expected_up
+        )
+
+        # Safety check: if empty mask
+        if inliers.sum() == 0:
+            return None
+
+        # Relaxed ratio check 
+        inlier_ratio = inliers.sum() / pts_3d.shape[1]
+        # d is distance from origin to plane.
+        height = abs(d) #of the points in the world coordinate
+
+        if inlier_ratio > 0.4 and 0.2 < abs(self.params.approx_car_height-height)< 0.8:    
+            return height
+        else: 
+            return None
+        
+        
+    
+    def ground_detection(self, current_keypoints:np.ndarray, current_3d_landmarks: np.ndarray, T_CW: np.ndarray):
+        
+        current_keypoints = np.squeeze(current_keypoints,axis=1)
+        idx_pts = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners,current_keypoints)
+        gd_mask = (idx_pts == self.params.idx_ground)# | (idx_pts == self.params.idx_ground+1) | (idx_pts == self.params.idx_ground-1)
+        
+        gd_points = current_3d_landmarks[:, gd_mask]
+        if gd_points.shape[1] > 0: 
+            h = self.estimate_ground_height(gd_points, T_CW)
+            if h is not None:
+                print(f"Height: {h}")
+                scale = self.params.approx_car_height / h
+                self.last_scale = scale
+            else: 
+                self.last_scale=1
+        
+        return self.last_scale
+        
     @staticmethod
     def as_lk_points(x: np.ndarray) -> np.ndarray:
         """
@@ -715,7 +843,7 @@ bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = pipeline.trac
 homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.findRelativePose(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
 
 # triangulate features from the first two keyframes to generate initial 3D point cloud
-bootstrap_point_cloud = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
+bootstrap_point_cloud, scale = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
 
 # generate initial state
 S = pipeline.bootstrapState(P_i=ransac_features_kf_2, X_i=bootstrap_point_cloud)
@@ -732,7 +860,8 @@ total_frames = last_frame - params.start_idx
 plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
 
 R_cw = homography[:3, :3]
-t_cw = homography[:3, 3]
+homography[:, 3] *= scale
+t_cw = homography[:, 3]
 R_wc = R_cw.T
 t_wc = - R_wc @ t_cw
 est_path.append([t_wc[0], t_wc[2]])
@@ -744,7 +873,9 @@ potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
 # find which features are not currently tracked and add them as candidate features
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
 frame_counter = params.start_idx +1
-
+prev_pose = homography
+pose = homography
+scale =1
 for i in range(params.start_idx + 1, last_frame):
     frame_counter+=1
     # read in next image
@@ -753,6 +884,9 @@ for i in range(params.start_idx + 1, last_frame):
     if image is None:
         print(f"Warning: could not read {image_path}")
         continue
+    
+    #Find the ground plane based on all the candidate features
+    scale = pipeline.ground_detection(S["P"], S["X"], pose)
 
     # track keypoints forward one frame
     S, last_features, last_candidates = pipeline.trackForward(S, last_image, image)
@@ -763,6 +897,10 @@ for i in range(params.start_idx + 1, last_frame):
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
 
+    delta_t = pose[:3, 3] - prev_pose[:3, 3]
+    delta_t *= scale
+    pose[:3, 3] = prev_pose[:3, 3] + delta_t
+    
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
@@ -774,6 +912,7 @@ for i in range(params.start_idx + 1, last_frame):
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
+
     n_inliers = len(inliers_idx)
 
     # plot current pose
@@ -797,13 +936,14 @@ for i in range(params.start_idx + 1, last_frame):
 
     # update last image
     last_image = image
+    prev_pose = pose
     
     # debugging prints
-    if last_features[inliers_idx].shape[0] < 50:
-        print("***************************")
-        print(f"# Keypoints Tracked: {last_features.shape[0]}\n"
-              f"#Candidates Tracked: {last_candidates.shape[0]}\n"
-              f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
-              f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
+    #if last_features[inliers_idx].shape[0] < 50:
+        #print("***************************")
+        #print(f"# Keypoints Tracked: {last_features.shape[0]}\n"
+              #f"#Candidates Tracked: {last_candidates.shape[0]}\n"
+              #f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
+              #f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
 
 cv2.destroyAllWindows()
