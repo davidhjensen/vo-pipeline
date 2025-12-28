@@ -742,37 +742,49 @@ class Pipeline():
         n_landmarks = len(active_ids)
         window_poses = list(S["pose_history"])
         
-        # Build a flat list of all 2D observations in the window
-        obs_list = [] # List of (pose_index, landmark_index)
-        obs_pixels = []
-        
+        obs_map = {f_idx: {"ids": [],"pixels": []} for f_idx in range(len(window_poses))}
         for f_idx, (pixels, ids) in enumerate(S["P_history"]):
             for p, id_ in zip(pixels, ids):
                 if id_ in id_to_idx:
-                    obs_list.append((f_idx, id_to_idx[id_]))
-                    obs_pixels.append(p[0]) # Extract (u, v)
-        
-        obs_pixels = np.array(obs_pixels)
+                    obs_map[f_idx]["ids"].append(id_to_idx[id_]) #local landmark index
+                    obs_map[f_idx]["pixels"].append(p[0]) #(u,v) from (1,2)
+
+        #convert to numpy arrays
+        for f_idx in obs_map.keys():
+            obs_map[f_idx]["ids"] = np.array(obs_map[f_idx]["ids"], dtype=np.int64)
+            obs_map[f_idx]["pixels"] = np.array(obs_map[f_idx]["pixels"], dtype=np.float64)
+
+        obs_list = []
+        for f_idx in obs_map.keys():
+            ids_local = obs_map[f_idx]["ids"]
+            for lm_idx in ids_local:
+                obs_list.append((f_idx, int(lm_idx)))
 
         # Pack variables and Sparsity Mask
         x0 = pack_params(window_poses, S["X"])
         A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list)  # needed for scipy least square
 
-        # Huber norm is used to ignore KLT tracking outliers
+        r0 = compute_rep_err(x0, window_poses, n_landmarks, obs_map, self.params.k)
+        print(f"BA before:RMSE={np.sqrt(np.mean(r0**2)):.3f},Nres={r0.size}")
+
+        #Huber norm is used to ignore KLT tracking outliers
         res = least_squares(
-            compute_rep_err(), x0, 
+            compute_rep_err, x0, 
             jac_sparsity=A,
-            args=(len(window_poses), n_landmarks, obs_list, obs_pixels),
+            args=(window_poses, n_landmarks, obs_map, self.params.k),
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
+
+        r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
+        print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
 
         # Update State with Refined Values
         new_poses, new_X = unpack_params(res.x, window_poses, n_landmarks)
         
         # Update current state
         S["X"] = new_X  # refined landmarks
-        current_pose = list(new_poses.values())[-1]
-        S["P"] = project_points(X = new_X, T = current_pose, k = self.params.k).reshape(-1, 1, 2).astype(np.float32)    # "refined" points, might be skipped maybe since we care about X (?) 
+        current_pose = new_poses[len(window_poses) - 1]
+        #S["P"] = project_points(X = new_X, T = current_pose, k = self.params.k).reshape(-1, 1, 2).astype(np.float32)    # "refined" points, might be skipped maybe since we care about X (?) 
 
         # Update history deques with refined values
         for i in range(len(S["pose_history"])):
@@ -882,16 +894,16 @@ for i in range(params.start_idx + 1, last_frame):
     est_path.append([t_wc[0], t_wc[2]])
     theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
     
-    # updateTrajectoryPlot(
-    #     plot_state, 
-    #     np.asarray(est_path), 
-    #     theta, 
-    #     S["X"],
-    #     S["P"].shape[0], 
-    #     flow_bgr=img_to_show,
-    #     frame_idx=frame_counter,
-    #     n_inliers=n_inliers,
-    # )
+    updateTrajectoryPlot(
+        plot_state, 
+        np.asarray(est_path), 
+        theta, 
+        S["X"],
+        S["P"].shape[0], 
+        flow_bgr=img_to_show,
+        frame_idx=frame_counter,
+        n_inliers=n_inliers,
+    )
     
 
     # update last image
