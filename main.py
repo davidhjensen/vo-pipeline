@@ -14,6 +14,13 @@ from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
+class D:
+    KITTI = 0
+    MALAGA = 1
+    PARKING = 2
+    CUSTOM = 3
+
+
 DATASET = 3
 
 # Next keyframe to use for bootstrapping
@@ -36,153 +43,155 @@ malaga_path = "malaga/malaga-urban-dataset-extract-07"
 parking_path = "parking/parking"
 own_dataset_path = "VAMR_Rome_dataset/VAMR_Rome_dataset"
 
-if DATASET == 0:
-    assert 'kitti_path' in locals(), "You must define kitti_path"
-    img_dir = os.path.join(kitti_path, '05/image_0')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
-    last_frame = 4540
-    K = np.array([
-        [7.18856e+02, 0, 6.071928e+02],
-        [0, 7.18856e+02, 1.852157e+02],
-        [0, 0, 1]
-    ])
-    ground_truth = np.loadtxt(os.path.join(kitti_path, 'poses', '05.txt'))
-    ground_truth = ground_truth[:, [-9, -1]]  # same as MATLAB(:, [end-8 end])
-    
 
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
-    # Shi-Tomasi corner parameters
-    feature_params = dict(  maxCorners = 50,
-                            qualityLevel = 0.01,
-                            minDistance = 10,
-                            blockSize = 7)
+match DATASET:
+    case D.KITTI:
+        assert 'kitti_path' in locals(), "You must define kitti_path"
+        img_dir = os.path.join(kitti_path, '05/image_0')
+        images = sorted(glob(os.path.join(img_dir, '*.png')))
+        last_frame = 4540
+        K = np.array([
+            [7.18856e+02, 0, 6.071928e+02],
+            [0, 7.18856e+02, 1.852157e+02],
+            [0, 0, 1]
+        ])
+        ground_truth = np.loadtxt(os.path.join(kitti_path, 'poses', '05.txt'))
+        ground_truth = ground_truth[:, [-9, -1]]  # same as MATLAB(:, [end-8 end])
+        
 
-    # Parameters for LKT
-    lk_params = dict(   winSize  = (21, 21),
-                        maxLevel = 3,
-                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-    
-    # Bootstrapping parameters
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[KITTI_BS_KF]
-    start_idx = KITTI_BS_KF
-    
-    # Bundle adjustment parameters
-    window_size = 10
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters
+        feature_params = dict(  maxCorners = 50,
+                                qualityLevel = 0.01,
+                                minDistance = 10,
+                                blockSize = 7)
 
-elif DATASET == 1:
-    assert 'malaga_path' in locals(), "You must define malaga_path"
-    img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
-    images = sorted(glob(os.path.join(img_dir, '*.jpg')))
-    images = images[0::2]   # left
-    last_frame = len(images)
-    K = np.array([
-        [621.18428, 0, 404.0076],
-        [0, 621.18428, 309.05989],
-        [0, 0, 1]
-    ])
-    ground_truth = None
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
-    # Shi-Tomasi corner parameters
-    feature_params = dict(  maxCorners = 60,
-                            qualityLevel = 0.05,
-                            minDistance = 10,
-                            blockSize = 9 )
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 3,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[KITTI_BS_KF]
+        start_idx = KITTI_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
 
-    # Parameters for LKT
-    lk_params = dict(   winSize  = (21, 21),
-                        maxLevel = 2,
-                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-    
-    # Bootstrapping parameters
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[MALAGA_BS_KF]
-    start_idx = MALAGA_BS_KF
-    
-    # Bundle adjustment parameters
-    window_size = 10
-    
-elif DATASET == 2:
-    assert 'parking_path' in locals(), "You must define parking_path"
-    img_dir = os.path.join(parking_path, 'images')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
-    last_frame = 598
-    K = np.loadtxt(os.path.join(parking_path, 'K.txt'), delimiter=",", usecols=(0, 1, 2))
-    ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
-    ground_truth = ground_truth[:, [-9, -1]]
-    
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
-    # Shi-Tomasi corner parameters    
-    # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
-    feature_params = dict(  maxCorners = 60,
-                            qualityLevel = 0.05,
-                            minDistance = 10,
-                            blockSize = 9 )
+    case D.MALAGA:
+        assert 'malaga_path' in locals(), "You must define malaga_path"
+        img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
+        images = sorted(glob(os.path.join(img_dir, '*.jpg')))
+        images = images[0::2]   # left
+        last_frame = len(images)
+        K = np.array([
+            [621.18428, 0, 404.0076],
+            [0, 621.18428, 309.05989],
+            [0, 0, 1]
+        ])
+        ground_truth = None
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
+                                minDistance = 10,
+                                blockSize = 9 )
 
-    # Parameters for LKT
-    lk_params = dict(   winSize  = (21, 21),
-                        maxLevel = 2,
-                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-    
-    # Bootstrapping parameters
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[PARKING_BS_KF]
-    start_idx = PARKING_BS_KF
-    
-    # Bundle adjustment parameters
-    window_size = 10
-    
-elif DATASET == 3:
-    # Own Dataset
-    assert 'own_dataset_path' in locals(), "You must define VAMR_Rome_dataset_path"
-    img_dir=os.path.join(own_dataset_path, 'images')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
-    last_frame = len(images)
-    K = np.array([
-        [1.05903465e+03, 0.00000000e+00, 6.29060709e+02],
-        [0.00000000e+00, 1.06306400e+03, 3.28563696e+02],
-        [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]
-    ])
-    ground_truth = None
-    
-##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
-    # Shi-Tomasi corner parameters    
-    feature_params = dict(  maxCorners = 60,
-                            qualityLevel = 0.05,
-                            minDistance = 10,
-                            blockSize = 9 )
-    # Parameters for LKT
-    lk_params = dict(   winSize  = (21, 21),
-                        maxLevel = 2,
-                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-    
-    # Bootstrapping parameters
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[CUSTOM_BS_KF]
-    start_idx = CUSTOM_BS_KF
-    
-    # Bundle adjustment parameters
-    window_size = 10
-    
-else:
-    raise ValueError("Invalid dataset index")
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[MALAGA_BS_KF]
+        start_idx = MALAGA_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
+        
+    case D.PARKING:
+        assert 'parking_path' in locals(), "You must define parking_path"
+        img_dir = os.path.join(parking_path, 'images')
+        images = sorted(glob(os.path.join(img_dir, '*.png')))
+        last_frame = 598
+        K = np.loadtxt(os.path.join(parking_path, 'K.txt'), delimiter=",", usecols=(0, 1, 2))
+        ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
+        ground_truth = ground_truth[:, [-9, -1]]
+        
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters    
+        # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
+                                minDistance = 10,
+                                blockSize = 9 )
+
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[PARKING_BS_KF]
+        start_idx = PARKING_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
+        
+    case D.CUSTOM:
+        # Own Dataset
+        assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
+        img_dir=os.path.join(own_dataset_path, 'images')
+        images = sorted(glob(os.path.join(img_dir, '*.png')))
+        last_frame = len(images)
+        K = np.array([
+            [1.05903465e+03, 0.00000000e+00, 6.29060709e+02],
+            [0.00000000e+00, 1.06306400e+03, 3.28563696e+02],
+            [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]
+        ])
+        ground_truth = None
+        
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters    
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
+                                minDistance = 10,
+                                blockSize = 9 )
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[CUSTOM_BS_KF]
+        start_idx = CUSTOM_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
+        
+    case _:
+        raise ValueError("Invalid dataset index")
 
 
 
@@ -726,7 +735,7 @@ class Pipeline():
         if not self.use_sliding_BA or len(S["pose_history"]) < self.params.window_size:
             return S
 
-        # We only optimize landmarks that are currently in our 'Established' set (S["X"])
+        # We only optimize landmarks that are currently in our 'current and valid' set (S["X"])
         active_ids = S["ids"]
         id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
         n_landmarks = len(active_ids)
