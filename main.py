@@ -772,6 +772,9 @@ class Pipeline():
         x0 = pack_params(window_poses, S["X"])
         A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list_for_sparsity)  # needed for scipy least square
 
+        #r0 = compute_rep_err(x0, window_poses, n_landmarks, obs_map, self.params.k)
+        #print(f"BA before:RMSE={np.sqrt(np.mean(r0**2)):.3f},Nres={r0.size}")
+
         # Huber norm is used to ignore KLT tracking outliers
         res = least_squares(
             compute_rep_err, x0, 
@@ -779,6 +782,9 @@ class Pipeline():
             args=(window_poses, n_landmarks, obs_map, self.params.k),
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
+
+        #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
+        #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
 
         # Update State with Refined Values
         new_poses, new_X = unpack_params(res.x, window_poses, n_landmarks)
