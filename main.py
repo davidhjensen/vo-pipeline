@@ -10,7 +10,7 @@ from scipy.optimize import least_squares
 from collections import deque
 
 from visualization import initTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlowBA, updateTrajectoryPlotBA
-from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points
+from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points, unpack_params_T
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
@@ -54,7 +54,7 @@ match DATASET:
 
     ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
         # Shi-Tomasi corner parameters
-        feature_params = dict(  maxCorners = 100,
+        feature_params = dict(  maxCorners = 60,
                                 qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7)
@@ -351,6 +351,7 @@ class Pipeline():
 
         #recover the relative camera pose
         _,R,t,_ = cv2.recoverPose(E,points1[inliers],points2[inliers],K)
+        
 
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
@@ -379,7 +380,7 @@ class Pipeline():
 
         # convert back to 3D
         points_3d = (points_homo[:3, :]/points_homo[3, :])
-
+        
         return points_3d
 
     def bootstrapState(self, P_1: np.ndarray, P_2: np.ndarray, X_2: np.ndarray, homography: np.ndarray) -> dict[str : np.ndarray]:
@@ -768,16 +769,15 @@ class Pipeline():
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
 
-        #r1 = compute_rep_err(res.x, window_poses, n_landmarks, obs_map, self.params.k)
-        #print(f"BA after:RMSE={np.sqrt(np.mean(r1**2)):.3f},Nres={r1.size}, cost={res.cost:.3f}, nfev={res.nfev}")
 
         # Update State with Refined Values
-        new_poses, new_X = unpack_params(res.x, window_poses, n_landmarks)
+        new_poses, new_X, new_S = unpack_params_T(res.x, window_poses, n_landmarks, S)
         
         # Update current state
+        S = new_S
         S["X"] = new_X  # refined landmarks
         current_pose = new_poses[len(window_poses) - 1]
-        #S["P"] = project_points(X = new_X, T = current_pose, k = self.params.k).reshape(-1, 1, 2).astype(np.float32)    # "refined" points, might be skipped maybe since we care about X (?) 
+        
 
         # Update history deques with refined values
         for i in range(len(S["pose_history"])):
@@ -797,7 +797,7 @@ class Pipeline():
             t_cw = pose[:3, 3]
             R_wc = R_cw.T
             t_wc = - R_wc @ t_cw
-            theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
+            theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
             state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
             local_traj.append(state_to_plot)
         

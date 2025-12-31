@@ -136,7 +136,6 @@ def unpack_params(x_vec: np.ndarray, window_poses: list[np.ndarray], n_landmarks
     """
     n_active_poses = len(window_poses) - 1
     poses = {0: window_poses[0]} # Fix the first pose as the anchor
-    
     # Extract poses
     for i in range(n_active_poses):
         idx = i * 6
@@ -150,6 +149,41 @@ def unpack_params(x_vec: np.ndarray, window_poses: list[np.ndarray], n_landmarks
     landmarks = x_vec[l_start:].reshape(3, n_landmarks)
     
     return (poses, landmarks)
+
+
+def unpack_params_T(x_vec: np.ndarray, window_poses: list[np.ndarray], n_landmarks: int, S:dict) -> tuple[dict[int, np.ndarray], np.ndarray, dict]:
+    """
+    Unpacks the x_vec back into structured poses and landmarks.
+    Args:
+        x_vec: 1D array of packed parameters
+        window_poses: List of (3, 4) matrices in the sliding window
+        n_landmarks: Number of landmarks
+    Returns:
+        poses: Dictionary mapping frame index to (3, 4) pose matrix
+        landmarks: (3, M) matrix of landmarks
+    """
+    n_active_poses = len(window_poses) - 1
+    poses = {0: window_poses[0]} # Fix the first pose as the anchor
+    new_S = S.copy()
+    # Extract poses
+    for i in range(n_active_poses):
+        
+        #Update S["T"]
+        past_pose = window_poses[i+1]
+        past_pose = past_pose.flatten()[None, :]
+        indices = np.where(np.all(np.isclose(new_S["T"], past_pose, atol=1e-6), axis=1))[0]
+        idx = i * 6
+        rvec = x_vec[idx:idx+3]
+        t = x_vec[idx+3:idx+6]
+        R, _ = cv2.Rodrigues(rvec)
+        poses[i+1] = np.hstack((R, t.reshape(3, 1)))
+        new_S["T"][indices, :] = poses[i+1].flatten()[None, :]
+        
+    # Extract landmarks
+    l_start = n_active_poses * 6
+    landmarks = x_vec[l_start:].reshape(3, n_landmarks)
+    
+    return (poses, landmarks, new_S)
 
 
 def get_jac_sparsity(n_poses: int, n_landmarks: int, obs_list: list[tuple[int, int]]) -> lil_matrix:
