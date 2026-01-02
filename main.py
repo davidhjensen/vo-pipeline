@@ -1,15 +1,33 @@
 import os
 from glob import glob
 
-from typing import Tuple, Dict
+from typing import Tuple
 
 import cv2
 import numpy as np
 import scipy
+from scipy.optimize import least_squares
+from collections import deque
 
-from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
+from visualization import initTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlowBA, updateTrajectoryPlotBA
+from BA_helper import as_lk_points, pack_params, get_jac_sparsity, unpack_params, compute_rep_err, project_points, unpack_params_T
+
+##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
+class D:
+    KITTI = 0
+    MALAGA = 1
+    PARKING = 2
+    CUSTOM = 3
+
+
 DATASET = 0
+
+# Next keyframe to use for bootstrapping
+KITTI_BS_KF = 3
+MALAGA_BS_KF = 5
+PARKING_BS_KF = 3
+CUSTOM_BS_KF = 5
 
 # Define dataset paths
 # (Set these variables before running)
@@ -18,158 +36,171 @@ malaga_path = "malaga/malaga-urban-dataset-extract-07"
 parking_path = "parking/parking"
 own_dataset_path = "VAMR_Rome_dataset/VAMR_Rome_dataset"
 
-if DATASET == 0:
-    assert 'kitti_path' in locals(), "You must define kitti_path"
-    img_dir = os.path.join(kitti_path, '05/image_0')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
-    last_frame = 4540
-    K = np.array([
-        [7.18856e+02, 0, 6.071928e+02],
-        [0, 7.18856e+02, 1.852157e+02],
-        [0, 0, 1]
-    ])
-    ground_truth = np.loadtxt(os.path.join(kitti_path, 'poses', '05.txt'))
-    ground_truth = ground_truth[:, [-9, -1]]  # same as MATLAB(:, [end-8 end])
 
-elif DATASET == 1:
-    assert 'malaga_path' in locals(), "You must define malaga_path"
-    img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
-    images = sorted(glob(os.path.join(img_dir, '*.jpg')))
-    images = images[0::2]   # left
-    last_frame = len(images)
-    K = np.array([
-        [621.18428, 0, 404.0076],
-        [0, 621.18428, 309.05989],
-        [0, 0, 1]
-    ])
-    ground_truth = None
-    
-elif DATASET == 2:
-    assert 'parking_path' in locals(), "You must define parking_path"
-    img_dir = os.path.join(parking_path, 'images')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
-    last_frame = 598
-    K = np.loadtxt(os.path.join(parking_path, 'K.txt'), delimiter=",", usecols=(0, 1, 2))
-    ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
-    ground_truth = ground_truth[:, [-9, -1]]
-    
-elif DATASET == 3:
-    # Own Dataset
-    assert 'own_dataset_path' in locals(), "You must define VAMR_Rome_dataset_path"
-    img_dir=os.path.join(own_dataset_path, 'images')
-    images = sorted(glob(os.path.join(img_dir, '*.png')))
-    last_frame = len(images)
-    K = np.array([
-        [1.05903465e+03, 0.00000000e+00, 6.29060709e+02],
-        [0.00000000e+00, 1.06306400e+03, 3.28563696e+02],
-        [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]
-    ])
-    ground_truth = None
+match DATASET:
+    case D.KITTI:
+        assert 'kitti_path' in locals(), "You must define kitti_path"
+        img_dir = os.path.join(kitti_path, '05/image_0')
+        images = sorted(glob(os.path.join(img_dir, '*.png')))
+        last_frame = 4540
+        K = np.array([
+            [7.18856e+02, 0, 6.071928e+02],
+            [0, 7.18856e+02, 1.852157e+02],
+            [0, 0, 1]
+        ])
+        ground_truth = np.loadtxt(os.path.join(kitti_path, 'poses', '05.txt'))
+        ground_truth = ground_truth[:, [-9, -1]]  # same as MATLAB(:, [end-8 end])
+        
 
-else:
-    raise ValueError("Invalid dataset index")
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.01,
+                                minDistance = 10,
+                                blockSize = 7)
+        
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+        
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 2
+        cols_roi_corners = 4
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[KITTI_BS_KF]
+        start_idx = KITTI_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 5
 
-# Paramaters for Shi-Tomasi corners
-if DATASET == 0: 
-    feature_params = dict( maxCorners = 60,
-                        qualityLevel = 0.01,
-                        minDistance = 10,
-                        blockSize = 7)
+    case D.MALAGA:
+        assert 'malaga_path' in locals(), "You must define malaga_path"
+        img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
+        images = sorted(glob(os.path.join(img_dir, '*.jpg')))
+        images = images[0::2]   # left
+        last_frame = len(images)
+        K = np.array([
+            [621.18428, 0, 404.0076],
+            [0, 621.18428, 309.05989],
+            [0, 0, 1]
+        ])
+        ground_truth = None
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
+                                minDistance = 10,
+                                blockSize = 9 )
 
-    # Parameters for LKT
-    lk_params = dict( winSize  = (21, 21),
-                    maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
-    
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 2
-    cols_roi_corners = 4
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[MALAGA_BS_KF]
+        start_idx = MALAGA_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
+        
+    case D.PARKING:
+        assert 'parking_path' in locals(), "You must define parking_path"
+        img_dir = os.path.join(parking_path, 'images')
+        images = sorted(glob(os.path.join(img_dir, '*.png')))
+        last_frame = 598
+        K = np.loadtxt(os.path.join(parking_path, 'K.txt'), delimiter=",", usecols=(0, 1, 2))
+        ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
+        ground_truth = ground_truth[:, [-9, -1]]
+        
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters    
+        # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
+                                minDistance = 10,
+                                blockSize = 9 )
 
-elif DATASET == 1: 
-    feature_params = dict( maxCorners = 60,
-                        qualityLevel = 0.05,
-                        minDistance = 10,
-                        blockSize = 9 )
-
-    # Parameters for LKT
-    lk_params = dict( winSize  = (21, 21),
-                    maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-
-elif DATASET == 2: 
-    feature_params = dict( maxCorners = 300,
-                        qualityLevel = 0.03,
-                        minDistance = 8,
-                        blockSize = 7 )
-
-    # Parameters for LKT
-    lk_params = dict( winSize  = (31, 31),
-                    maxLevel = 4,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-
-elif DATASET == 3: 
-    feature_params = dict( maxCorners = 60,
-                        qualityLevel = 0.05,
-                        minDistance = 10,
-                        blockSize = 9 )
-    # Parameters for LKT
-    lk_params = dict( winSize  = (21, 21),
-                    maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
-    # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    new_feature_min_squared_diff = 4
-    rows_roi_corners = 3
-    cols_roi_corners = 3
-
-
-# Next keyframe to use for bootstrapping
-KITTI_BS_KF = 3
-MALAGA_BS_KF = 5
-PARKING_BS_KF = 3
-CUSTOM_BS_KF = 5
-
-# Number of rows and columns to divide image into for feature detection and number of features to track in each cell
-KITTI_ST_ROWS, KITTI_ST_COLS, KITTI_NUM_FEATURES = 2, 4, 20
-MALAGA_ST_ROWS, MALAGA_ST_COLS, MALAGA_NUM_FEATURES = 2, 4, 20
-PARKING_ST_ROWS, PARKING_ST_COLS, PARKING_NUM_FEATURES = 2, 4, 20
-CUSTOM_ST_ROWS, CUSTOM_ST_COLS, CUSTOM_NUM_FEATURES = 2, 4, 20
-
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[PARKING_BS_KF]
+        start_idx = PARKING_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
+        
+    case D.CUSTOM:
+        # Own Dataset
+        assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
+        img_dir=os.path.join(own_dataset_path, 'images')
+        images = sorted(glob(os.path.join(img_dir, '*.png')))
+        last_frame = len(images)
+        K = np.array([
+            [1.05903465e+03, 0.00000000e+00, 6.29060709e+02],
+            [0.00000000e+00, 1.06306400e+03, 3.28563696e+02],
+            [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]
+        ])
+        ground_truth = None
+        
+    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+        # Shi-Tomasi corner parameters    
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
+                                minDistance = 10,
+                                blockSize = 9 )
+        # Parameters for LKT
+        lk_params = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
+        new_feature_min_squared_diff = 4
+        rows_roi_corners = 3
+        cols_roi_corners = 3
+        
+        # Bootstrapping parameters
+        bs_kf_1 = images[0]
+        bs_kf_2 = images[CUSTOM_BS_KF]
+        start_idx = CUSTOM_BS_KF
+        
+        # Bundle adjustment parameters
+        window_size = 10
+        
+    case _:
+        raise ValueError("Invalid dataset index")
 
 class VO_Params():
-    bs_kf_1: str # path to first keyframe used for bootstrapping dataset
-    bs_kf_2: str # path to second keyframe used for bootstrapping dataset
-    feature_masks: list[np.ndarray] # mask image into regions for feature tracking 
-    shi_tomasi_params: dict
-    klt_params: dict
-    k: np.ndarray # camera intrinsics matrix
+    bs_kf_1 : str # path to first keyframe used for bootstrapping dataset
+    bs_kf_2 : str # path to second keyframe used for bootstrapping dataset
+    rows_roi_corners : int # number of rows to split image into for feature detection
+    cols_roi_corners : int # number of cols to split image into for feature detection
+    feature_masks : list[np.ndarray] # mask image into regions for feature tracking 
+    shi_tomasi_params : dict # cv2 parameters for Shi-Tomasi corners
+    klt_params : dict # cv2 parameters for KLT tracking
+    k : np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-    rows_roi_corners :int
-    cols_roi_corners :int
-    abs_eig_min: float =1e-2
-    
-    
-    # ADD NEW PARAMS HERE
+    abs_eig_min : float = 1e-2 
+    alpha : float = 0.02
 
-    if DATASET == 0: 
-        alpha: float = 0.02
-    elif DATASET == 1: 
-        alpha :float = 0.02
-    elif DATASET == 2: 
-        alpha :float = 0.05
-    elif DATASET == 3: 
-        alpha :float = 0.02
-
-    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff):
+    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
         self.feature_masks = self.get_feature_masks(bs_kf_1, rows_roi_corners, cols_roi_corners)
@@ -180,6 +211,7 @@ class VO_Params():
         self.new_feature_min_squared_diff = new_feature_min_squared_diff
         self.rows_roi_corners = rows_roi_corners
         self.cols_roi_corners = cols_roi_corners
+        self.window_size = window_size
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -211,52 +243,16 @@ class VO_Params():
                 masks.append(mask)
 
         return masks
-    
 
-if DATASET == 0:
-    assert 'kitti_path' in locals(), "You must define kitti_path"
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[KITTI_BS_KF]
-    start_idx = KITTI_BS_KF
-    # ADD NEW PARAMS HERE
-
-elif DATASET == 1:
-    assert 'malaga_path' in locals(), "You must define malaga_path"
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[MALAGA_BS_KF]
-    start_idx = MALAGA_BS_KF
-    # ADD NEW PARAMS HERE
-
-elif DATASET == 2:
-    assert 'parking_path' in locals(), "You must define parking_path"
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[PARKING_BS_KF]
-    start_idx = PARKING_BS_KF
-    # ADD NEW PARAMS HERE
-
-elif DATASET == 3:
-    # Own Dataset
-    # TODO: define your own dataset and load K obtained from calibration of own camera
-    assert 'own_dataset_path' in locals(), "You must define own_dataset_path"
-    bs_kf_1 = images[0]
-    bs_kf_2 = images[CUSTOM_BS_KF]
-    start_idx = CUSTOM_BS_KF
-    # ADD NEW PARAMS HERE
-
-else:
-    raise ValueError("Invalid dataset index")
-
-# ADD NEW PARAMS HERE TO THE INIT
-params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff)
 class Pipeline():
 
     params: VO_Params
 
-    def __init__(self, params: VO_Params):
-
+    def __init__(self, params: VO_Params, use_sliding_window_BA: bool = False):
         self.params = params
-
-        return
+        self.use_sliding_BA : bool = use_sliding_window_BA  # whether we want to use sliding_window BA or not, by default, it's false
+        self.next_id : int = 0  # this parameter is only used for sliding BA and is used to keep track of landmarks through operation (cause landmarks might decrease/increase)
+        self.full_trajectory = []
     
     def get_mask_index(u: int, v: int, H: int, W: int, rows: int, cols: int) -> int:
         """
@@ -316,35 +312,46 @@ class Pipeline():
             initial_points[still_detected] (np.ndarray): (N,1,2) points in bs_kf_1 that were tracked to the next keyframe.
             points[still_detected] (np.ndarray): (M,1,2) tracked points in bs_kf_2.
         """
-        img_bs_kf_1_index=images.index(self.params.bs_kf_1)
-        img_bs_kf_2_index=images.index(self.params.bs_kf_2)
-        still_detected=np.ones(st_corners_kf_1.shape[0],dtype=bool)
-        points = self.as_lk_points(st_corners_kf_1.copy())
+        img_bs_kf_1_index = images.index(self.params.bs_kf_1)
+        img_bs_kf_2_index = images.index(self.params.bs_kf_2)
+        still_detected = np.ones(st_corners_kf_1.shape[0],dtype=bool)
+        points = as_lk_points(st_corners_kf_1.copy())
         initial_points = st_corners_kf_1.copy()
         #Track keypoints frame-by-frame from first bs frame to second bs frame
         for i in range(img_bs_kf_1_index, img_bs_kf_2_index):
-            current_image=cv2.imread(images[i],cv2.IMREAD_GRAYSCALE)
-            next_image=cv2.imread(images[i+1],cv2.IMREAD_GRAYSCALE)
-            nextPts,status,error=cv2.calcOpticalFlowPyrLK(current_image,next_image,points, None, **self.params.klt_params)
-            points=nextPts
-            status=status.flatten()
-            still_detected=still_detected & (status==1)
+            current_image = cv2.imread(images[i],cv2.IMREAD_GRAYSCALE)
+            next_image = cv2.imread(images[i+1],cv2.IMREAD_GRAYSCALE)
+            nextPts, status, _ = cv2.calcOpticalFlowPyrLK(current_image,next_image,points, None, **self.params.klt_params)
+            points = nextPts
+            status = status.flatten()
+            still_detected = still_detected & (status==1)
 
         # Keep only points that were successfully tracked throughout
         return initial_points[still_detected], points[still_detected]
 
     def findRelativePose(self, points1, points2):
+        """
+        Step 3 (Initialization): estimate the relative pose between the two bootstrap keyframes using the 8-point algorithm with RANSAC.
+        Args:
+            points1 (np.ndarray): (N,1,2) keypoints in bs_kf_1.
+            points2 (np.ndarray): (N,1,2) corresponding keypoints in bs_kf_2.
+        Returns:
+            np.ndarray: (3,4) relative pose [R|t] from bs_kf_1 to bs_kf_2.
+            np.ndarray: (M,1,2) inlier keypoints in bs_kf_1.
+            np.ndarray: (M,1,2) inlier keypoints in bs_kf_2.
+        """
         #F mat using ransac
-        fundamental_matrix, inliers =cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
+        fundamental_matrix, inliers = cv2.findFundamentalMat(points1,points2,cv2.FM_RANSAC,ransacReprojThreshold=1.0)
 
         #using boolean vector
         inliers = inliers.ravel().astype(bool)
 
         #compute the essential matrix
-        E= K.T@ fundamental_matrix@K
+        E= K.T @ fundamental_matrix@K
 
         #recover the relative camera pose
-        _,R,t,_=cv2.recoverPose(E,points1[inliers],points2[inliers],K)
+        _,R,t,_ = cv2.recoverPose(E,points1[inliers],points2[inliers],K)
+        
 
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
@@ -373,29 +380,43 @@ class Pipeline():
 
         # convert back to 3D
         points_3d = (points_homo[:3, :]/points_homo[3, :])
-
+        
         return points_3d
 
-    def bootstrapState(self, P_i: np.ndarray, X_i: np.ndarray) -> dict[str : np.ndarray]:
+    def bootstrapState(self, P_1: np.ndarray, P_2: np.ndarray, X_2: np.ndarray, homography: np.ndarray) -> dict[str : np.ndarray]:
         """
-            Builds the initial state taking the 2D keypoints and their respective 3D points generated by the bootstrap
-            
+            Initializes the state after the previous steps.
             Args:
-                P_i: kx1x2 matrix of 2D keypoints found from the first two frames
-                X_i: 3xk matrix containing the 3D projections of the keypoints
-            
+                P_1: keypoints in the original (first) frame
+                P_2: keypoints in the second frame selected for bootstrapping
+                X_i: current landmarks from the second frame
+                homography: relative transformation between first and second frame selected for bootstrapping
             Returns:
-                dictionary of dictionaries, where every variable of interest is a key and its value is the matrix (e.g. S["P"] returns a kx1x2 matrix of keypoints)  
+                dict: the state in the form of a dictionary where each state-string variable is the key to get the value
+                      e.g.: S["P"] returns the current frame 2D landmarks
         """
         S : dict[str : np.ndarray] = {}
-        assert P_i.shape[0] == X_i.shape[1], "2D keypoints number of rows should match the 3D keypoints number of columns"
+        assert P_2.shape[0] == X_2.shape[1], "2D keypoints number of rows should match the 3D keypoints number of columns"
+        assert P_1.shape[0] == P_2.shape[0], "2D keypoints from frame 1 and 2 MUST be the same"
         
-        S["P"] = P_i    
-        S["X"] = X_i    
+        S["P"] = P_2    # these are the "current" keypoints from frame 2    
+        S["X"] = X_2    
         S["C"] = np.empty((0,1,2))
         S["F"] = np.empty_like(S["C"])
         S["T"] = np.empty((0,12))
 
+        if self.use_sliding_BA:
+            n_pts = X_2.shape[1] # we get the landmark number
+            S["ids"] = np.arange(n_pts)     # initialize this as the range going from 0 to n_pts-1
+            self.next_id = n_pts
+            # only created if we are using BA
+            S["P_history"] = deque(maxlen=self.params.window_size)
+            S["P_history"].append((P_1.copy(), S["ids"].copy()))   # this is a list of tuples containing kx1x2 keypoints and the IDs associated to the landmarks for tracking through frames
+            S["P_history"].append((P_2.copy(), S["ids"].copy()))  
+            
+            S["pose_history"] = deque(maxlen=self.params.window_size)
+            S["pose_history"].append(np.hstack((np.eye(3), np.zeros((3,1))))) # frame zero, so the origin
+            S["pose_history"].append(homography)  # frame one, the homography from frame 0 to frame 1 we found earlier
         return S
 
     def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
@@ -411,9 +432,8 @@ class Pipeline():
             np.ndarray: keypoints from the previous frame that were successfully tracked forward
             np.ndarray: candidate keypoints from the previous frame that were successfully tracked forward
         """
-        # NOTE: might make sense to replace assert with ifs since maybe even if we have no points nor candidates we still want to return them empty again
         # FIRST WE TRACK "ESTABILISHED KEYPOINTS"
-        points_2D = self.as_lk_points(state["P"])
+        points_2D = as_lk_points(state["P"])
         assert points_2D.shape[0] > 0, "There are no keypoints here, we can't track them forward"    
 
         current_points, status, _ = cv2.calcOpticalFlowPyrLK(prevImg=img_1, nextImg=img_2, prevPts=points_2D, nextPts=None, **self.params.klt_params)
@@ -423,10 +443,12 @@ class Pipeline():
         state["P"] = current_points[status == 1]
         state["X"] = state["X"][:, status == 1]  # only get the ones with "true" status and slice them as 3xk
         
-
+        if self.use_sliding_BA:
+            state["ids"] = state["ids"][status == 1]    # filter new ids
+                        
         # THEN WE TRACK CANDIDATES - but in the first frame there are no candidates to track other than the established points
         # Therefore 
-        candidates = self.as_lk_points(state["C"])
+        candidates = as_lk_points(state["C"])
         if candidates.shape[0] != 0:
             assert candidates.dtype == np.float32
             assert candidates.ndim == 3 and candidates.shape[1:] == (1, 2)
@@ -473,7 +495,7 @@ class Pipeline():
 
         if not success:
             print("Pose estimation failed")
-            return ({}, np.zeros((3,4))) # maybe we could raise an error instead of returning this
+            return ({}, np.zeros((3,4)), np.empty((0,0))) # maybe we could raise an error instead of returning this
         
         # r_vec needs to be converted into a 3x3
         R, _ = cv2.Rodrigues(r_vec)    
@@ -484,6 +506,10 @@ class Pipeline():
         # by doing the following thing the idea is that we are only keeping the inliers
         new_state["P"] = state["P"][inliers_idx]
         new_state["X"] = state["X"][:, inliers_idx] # slice this since we want it as a 3xk
+                
+        if self.use_sliding_BA:
+            new_state["ids"] = state["ids"][inliers_idx] # update also the "valid" indices
+            new_state["pose_history"].append(T_w2c)
 
         return new_state, T_w2c, inliers_idx
     
@@ -515,8 +541,8 @@ class Pipeline():
         pts_2D_first_obs_hom = np.column_stack((pts_2D_first_obs, np.ones(m)))
         K = params.k
         K_inv = np.linalg.inv(K)
-        n_pts_2D_cur = K_inv@pts_2D_cur_hom.T #(3,m)
-        n_pts_2D_first_obs = K_inv@pts_2D_first_obs_hom.T #(3,m)
+        n_pts_2D_cur = K_inv @ pts_2D_cur_hom.T #(3,m)
+        n_pts_2D_first_obs = K_inv @ pts_2D_first_obs_hom.T #(3,m)
         
         first_poses_mat = state["T"].copy()  #flattened on C order (m,12)
         first_poses_mat_tensor = first_poses_mat.reshape(m, 3, 4) #(m,3,4)
@@ -567,7 +593,7 @@ class Pipeline():
         for i, g in enumerate(groups):
 
             c_1_pose = unique_poses[i].reshape(3,4)
-            proj_1 = K@c_1_pose
+            proj_1 = K @ c_1_pose
             valid_pts_1 = valid_pts_2D_first[g].T #(2,k)
             valid_pts_2 = valid_pts_2D_cur[g].T #(2,k)
             points_homo = cv2.triangulatePoints(proj_1, proj_2, valid_pts_1, valid_pts_2)
@@ -579,7 +605,12 @@ class Pipeline():
             pixel_coords = valid_pts_2[:, mask].T  #(j,2)
             pixel_coords = pixel_coords[:, None, :] #Add dimension for consistency (j,1,2)
             state["P"] = np.concatenate((state["P"], pixel_coords), axis=0) #(n+j,1 ,2)
-            state["X"] = np.concatenate((state["X"], valid_3d_pts), axis = 1) #(3, n+j)
+            state["X"] = np.concatenate((state["X"], valid_3d_pts), axis=1) #(3, n+j)
+            
+            if self.use_sliding_BA:
+                new_ids = np.arange(self.next_id, self.next_id + valid_3d_pts.shape[1])     # get the new ids
+                state["ids"] = np.concatenate((state["ids"], new_ids))  # add them to the state
+                self.next_id += len(new_ids)    # update the next_id
         
         #Update the candidate set removing the now triangulated points 
         state["C"] = pts_2D_cur[not_idx, None, :]
@@ -645,28 +676,6 @@ class Pipeline():
         
         return potential_kp_candidates
 
-    def keypoints2set(keypoints: np.ndarray) -> set:
-        """Convert numpy keypoint list [k x 1 x 2] to a set of keypoints
-
-        Args:
-            keypoints (np.ndarray): keypoint array
-
-        Returns:
-            set: keypoint set
-        """
-        return set([(row[0][0], row[0][1]) for row in keypoints.tolist()])
-
-    def set2keypoints(keypoint_set: set) -> np.ndarray:
-        """Convert keypoint set (u, v) to a numpy array [k x 1 x 2]
-
-        Args:
-            keypoint_set (set): keypoint set
-
-        Returns:
-            np.ndarray: keypoint array with shape [k x 1 x 2]
-        """
-        return np.array([[[keypoint[0], keypoint[1]]] for keypoint in keypoint_set])
-
     def addNewFeatures(self, S: dict, potential_candidate_features: np.ndarray, cur_pose: np.ndarray) -> dict:
         """Given an array of features, update S with featurees that are not already being tracked
 
@@ -701,44 +710,135 @@ class Pipeline():
         S_new["F"] = np.vstack((S["F"], new_features))
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
         return S_new
-
-    
-    @staticmethod
-    def as_lk_points(x: np.ndarray) -> np.ndarray:
-        """
-        Convert keypoints to OpenCV LK format:
-        (N,1,2), float32, contiguous
-        """
-        if x.size == 0:
-            return np.empty((0, 1, 2), dtype=np.float32)
-
-        if x.ndim == 2 and x.shape[1] == 2:
-            x = x[:, None, :]
-
-        return np.ascontiguousarray(x, dtype=np.float32)
     
 
+    def slidingWindowRefinement(self, S: dict) -> dict:
+        """
+        Perform sliding window bundle adjustment to refine camera poses and 3D landmarks in the current window.
+        Args:
+            S (dict): current state containing pose history, landmark history, and observations.
+        Returns:
+            dict: updated state with refined poses and landmarks.
+        """
+        # Check if BA is enabled and window is full, but we could also start when we have like 5 or 6 (that is a minimal change though, especially since drift grows with time, so if we start later it is ok)
+        if not self.use_sliding_BA or len(S["pose_history"]) < self.params.window_size:
+            return S
 
-# Create instance of pipeline
-pipeline = Pipeline(params)
+        # We only optimize landmarks that are currently in our 'current and valid' set (S["X"])
+        active_ids = S["ids"]
+        id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
+        n_landmarks = len(active_ids)
+        
+        window_poses = list(S["pose_history"])
+                
+        active_ids = S["ids"]
+        id_to_idx = {id_: i for i, id_ in enumerate(active_ids)}
+        n_landmarks = len(active_ids)
+        
+        # Build a flat list of all 2D observations in the window
+        obs_map = {}  # (frame_idx, landmark_idx) -> pixel (u, v)
+        
+        for f_idx, (pixels, ids) in enumerate(S["P_history"]):
+            local_ids = []
+            local_pixels = []
+            for p, pt_id in zip(pixels, ids):
+                if pt_id in id_to_idx:
+                    local_ids.append(id_to_idx[pt_id])
+                    local_pixels.append(p[0]) # Extract (u, v)
+            
+            # Fill the dictionary for this frame
+            obs_map[f_idx] = {
+                'ids': np.array(local_ids),
+                'pixels': np.array(local_pixels)
+            }
+        
+        obs_list_for_sparsity = []
+        for f_idx, data in obs_map.items():
+            for l_idx in data['ids']:
+                obs_list_for_sparsity.append((f_idx, l_idx))
+                
+        # Pack variables and Sparsity Mask
+        x0 = pack_params(window_poses, S["X"])
+        A = get_jac_sparsity(len(window_poses), n_landmarks, obs_list_for_sparsity)  # needed for scipy least square
 
-# extract features from the first image of the dataset
-bootstrap_features_kf_1 = pipeline.extractFeaturesBootstrap()
+        # Huber norm is used to ignore KLT tracking outliers
+        res = least_squares(
+            compute_rep_err, x0, 
+            jac_sparsity=A,
+            args=(window_poses, n_landmarks, obs_map, self.params.k),
+            loss='huber', f_scale=1.0, method='trf', ftol=1e-3
+        )
 
-# track extracted features forward to the next keyframe in the dataset
-bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = pipeline.trackForwardBootstrap(bootstrap_features_kf_1)
 
-# calculate the homographic transformation between the first two keyframes
-homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.findRelativePose(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
+        # Update State with Refined Values
+        new_poses, new_X, new_S = unpack_params_T(res.x, window_poses, n_landmarks, S)
+        
+        # Update current state
+        S = new_S
+        S["X"] = new_X  # refined landmarks
+        current_pose = new_poses[len(window_poses) - 1]
+        
 
-# triangulate features from the first two keyframes to generate initial 3D point cloud
-bootstrap_point_cloud = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
+        # Update history deques with refined values
+        for i in range(len(S["pose_history"])):
+            S["pose_history"][i] = new_poses[i]
+            
+        return S
+    
+    def updateFullTraj(self, window_poses): 
+        
+        full_traj = self.full_trajectory.copy()
+        
+        #Convert into world Frame:
+        window_poses_list = list(window_poses)
+        local_traj = []
+        for pose in window_poses_list:
+            R_cw = pose[:3, :3]
+            t_cw = pose[:3, 3]
+            R_wc = R_cw.T
+            t_wc = - R_wc @ t_cw
+            theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+            state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
+            local_traj.append(state_to_plot)
+        
+        start_idx = max(0, len(full_traj)-len(local_traj))
+        full_traj[start_idx:start_idx+len(local_traj)]=local_traj
+        
+        return full_traj 
+    
+    def pipeline_init(self):
+        """
+        Initialize the VO pipeline by bootstrapping from the first two keyframes.
+        Returns:
+            tuple[dict, np.ndarray]: initial state and homographic transformation between the first two keyframes.
+        """
+        # extract features from the first image of the dataset
+        bootstrap_features_kf_1 = self.extractFeaturesBootstrap()
+
+        # track extracted features forward to the next keyframe in the dataset
+        bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = self.trackForwardBootstrap(bootstrap_features_kf_1)
+
+        # calculate the homographic transformation between the first two keyframes
+        homography, ransac_features_kf_1, ransac_features_kf_2 = self.findRelativePose(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
+
+        # triangulate features from the first two keyframes to generate initial 3D point cloud
+        bootstrap_point_cloud = self.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
+        
+        # generate initial state
+        S = pipeline.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
+        return (S, homography)
+    
+# create instance of parameters
+params = VO_Params(bs_kf_1, bs_kf_2, feature_params, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
+plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
+
+# create instance of pipeline
+use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA)
 
 # generate initial state
-S = pipeline.bootstrapState(P_i=ransac_features_kf_2, X_i=bootstrap_point_cloud)
+S, homography = pipeline.pipeline_init()
 
-# ploting setup
-est_path = []
 # initialize previous image
 last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
 
@@ -746,27 +846,35 @@ last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
 first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
 
 total_frames = last_frame - params.start_idx
-plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+
+if plot_same_window:
+    plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+else:
+    plot_state = initTrajectoryPlotNoFlow(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+    
 
 R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
 R_wc = R_cw.T
 t_wc = - R_wc @ t_cw
-est_path.append([t_wc[0], t_wc[2]])
 theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+
+state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
+pipeline.full_trajectory.append(state_to_plot)
 
 #Initialize candidate set with the second keyframe
 potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
 
 # find which features are not currently tracked and add them as candidate features
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
-frame_counter = params.start_idx +1
+frame_counter = params.start_idx + 1
 
 for i in range(params.start_idx + 1, last_frame):
     frame_counter+=1
     # read in next image
     image_path = images[i]
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
     if image is None:
         print(f"Warning: could not read {image_path}")
         continue
@@ -779,6 +887,16 @@ for i in range(params.start_idx + 1, last_frame):
 
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
+    
+    dummy=(np.zeros(2), 0)
+    pipeline.full_trajectory.append(dummy)
+    
+    # perform sliding window bundle adjustment to refine pose and landmarks
+    if use_sliding_window_BA:
+        S["P_history"].append((S["P"].copy(), S["ids"].copy()))  # append the new keypoints
+        S = pipeline.slidingWindowRefinement(S)
+        pose = list(S["pose_history"])[-1]
+        pipeline.full_trajectory = pipeline.updateFullTraj(S["pose_history"])
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
@@ -791,26 +909,7 @@ for i in range(params.start_idx + 1, last_frame):
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
-    n_inliers = len(inliers_idx)
-
-    # plot current pose
-    R_cw = pose[:3, :3]
-    t_cw = pose[:3, 3]
-    R_wc = R_cw.T
-    t_wc = - R_wc @ t_cw
-    est_path.append([t_wc[0], t_wc[2]])
-    theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
-    
-    updateTrajectoryPlot(
-        plot_state, 
-        np.asarray(est_path), 
-        theta, 
-        S["X"],
-        S["P"].shape[0], 
-        flow_bgr=img_to_show,
-        frame_idx=frame_counter,
-        n_inliers=n_inliers,
-    )
+    n_inliers = len(inliers_idx) 
 
     # update last image
     last_image = image
@@ -822,5 +921,35 @@ for i in range(params.start_idx + 1, last_frame):
               f"#Candidates Tracked: {last_candidates.shape[0]}\n"
               f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
               f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
+    
+    
+    if plot_same_window:
+        updateTrajectoryPlotBA(
+        plot_state, 
+        pipeline.full_trajectory,
+        S["X"],
+        S["P"].shape[0], 
+        flow_bgr=img_to_show,
+        frame_idx=frame_counter,
+        n_inliers=n_inliers
+    )
+    else:
+        updateTrajectoryPlotNoFlowBA(
+            plot_state, 
+            pipeline.full_trajectory,
+            S["X"],
+            S["P"].shape[0], 
+            flow_bgr=img_to_show,
+            frame_idx=frame_counter,
+            n_inliers=n_inliers
+        )
+        
+        cv2.imshow("tracking...", img_to_show)
+        cv2.waitKey(10)
 
 cv2.destroyAllWindows()
+
+
+
+
+
