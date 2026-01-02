@@ -85,7 +85,7 @@ if DATASET == 0:
     # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     new_feature_min_squared_diff = 4
     rows_roi_corners = 3
-    cols_roi_corners = 3
+    cols_roi_corners = 5
 
 elif DATASET == 1: 
     feature_params = dict( maxCorners = 60,
@@ -166,6 +166,8 @@ class VO_Params():
         self.cols_roi_corners = cols_roi_corners
         
         self.idx_ground = self.rows_roi_corners * self.cols_roi_corners -(np.floor(self.cols_roi_corners/2).astype(int)+1)
+        ground_list = [self.idx_ground-1, self.idx_ground, self.idx_ground+1]
+        self.idx_ground_set = set(ground_list)
         self.approx_car_height = 1.6
     
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
@@ -255,12 +257,22 @@ class Pipeline():
         """
         st_corners = np.empty((0, 1, 2), dtype=np.float32)
         img_grayscale = cv2.imread(self.params.bs_kf_1, cv2.IMREAD_GRAYSCALE)
+        
         for n, mask in enumerate(self.params.feature_masks):
             features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params)
             # If no corners are found in this region, skip it
             if features is None: 
                 print(f"No features found for mask {n+1}!")
                 continue
+
+            if n in self.params.idx_ground_set: 
+                feature_params = dict( maxCorners = 100,
+                                        qualityLevel = 0.005,
+                                        minDistance = 3,
+                                        blockSize = 3)
+                
+                features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **feature_params)
+            
             # Warn if very few features were found in this region (not necessarily an error)
             if features.shape[0] < 10:
                 #print(f"Only {features.shape[0]} features found for mask {n+1}!")
@@ -332,25 +344,13 @@ class Pipeline():
         p1 = points_1.reshape(-1,2).T
         p2 = points_2.reshape(-1,2).T
         
-        idx_pts_1 = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners,p1.T)
-        idx_pts_2 = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners,p2.T)
-
-        equal_mask = (idx_pts_1 == idx_pts_2) & (idx_pts_1 == self.params.idx_ground)
-        gd_indices = np.where(equal_mask)[0]
         # triangulate homogeneous coordinates using DLT
         points_homo = cv2.triangulatePoints(proj_1, proj_2, p1, p2)
 
         # convert back to 3D
         points_3d = (points_homo[:3, :]/points_homo[3, :])
         
-        scale=1
-        if len(gd_indices) >0:
-            gd_points = points_3d[:, gd_indices]
-            est_y = get_weighted_y(gd_points)
-            scale = self.params.approx_car_height/est_y
-            points_3d *= scale
-        
-        return points_3d, scale
+        return points_3d
 
     def bootstrapState(self, P_i: np.ndarray, X_i: np.ndarray) -> dict[str : np.ndarray]:
         """
@@ -764,6 +764,7 @@ class Pipeline():
 
     def estimate_ground_height(self, pts_3d, cur_pose):
         if pts_3d.shape[1] < 15:
+            print("ERROR")
             return None
 
         # Calculate median depth to scale threshold
@@ -790,7 +791,7 @@ class Pipeline():
         height = abs(d) #of the points in the world coordinate
 
         if inlier_ratio > 0.4 and 0.2 < abs(self.params.approx_car_height-height)< 0.8:    
-            return height
+            return height, inliers
         else: 
             return None
         
@@ -799,12 +800,12 @@ class Pipeline():
     def ground_detection(self, current_keypoints:np.ndarray, current_3d_landmarks: np.ndarray, T_CW: np.ndarray):
         
         current_keypoints = np.squeeze(current_keypoints,axis=1)
-        idx_pts = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners,current_keypoints)
-        gd_mask = (idx_pts == self.params.idx_ground)# | (idx_pts == self.params.idx_ground+1) | (idx_pts == self.params.idx_ground-1)
+        idx_pts = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners, self.params.cols_roi_corners, current_keypoints)
+        gd_mask = (idx_pts == self.params.idx_ground) | (idx_pts == self.params.idx_ground+1) | (idx_pts == self.params.idx_ground-1)
         
         gd_points = current_3d_landmarks[:, gd_mask]
         if gd_points.shape[1] > 0: 
-            h = self.estimate_ground_height(gd_points, T_CW)
+            h, inliers = self.estimate_ground_height(gd_points, T_CW)
             if h is not None:
                 print(f"Height: {h}")
                 scale = self.params.approx_car_height / h
@@ -812,7 +813,7 @@ class Pipeline():
             else: 
                 self.last_scale=1
         
-        return self.last_scale
+        return self.last_scale, gd_mask, inliers
         
     @staticmethod
     def as_lk_points(x: np.ndarray) -> np.ndarray:
@@ -836,107 +837,128 @@ pipeline = Pipeline(params)
 # extract features from the first image of the dataset
 bootstrap_features_kf_1 = pipeline.extractFeaturesBootstrap()
 
+img_grayscale = cv2.imread(params.bs_kf_1, cv2.IMREAD_GRAYSCALE)
+
 # track extracted features forward to the next keyframe in the dataset
 bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2 = pipeline.trackForwardBootstrap(bootstrap_features_kf_1)
 
 # calculate the homographic transformation between the first two keyframes
 homography, ransac_features_kf_1, ransac_features_kf_2 = pipeline.findRelativePose(bootstrap_tracked_features_kf_1, bootstrap_tracked_features_kf_2)
 
+img_to_show = draw_optical_flow(cv2.cvtColor(img_grayscale, cv2.COLOR_GRAY2BGR), ransac_features_kf_1, ransac_features_kf_2, (0, 255, 0), 1, .15)
+
+cv2.imshow("Tracked points", img_to_show)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
 # triangulate features from the first two keyframes to generate initial 3D point cloud
-bootstrap_point_cloud, scale = pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
+bootstrap_point_cloud= pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
 
-# generate initial state
-S = pipeline.bootstrapState(P_i=ransac_features_kf_2, X_i=bootstrap_point_cloud)
+pose = homography[:, 3]
+scale, gd_mask, inliers = pipeline.ground_detection(ransac_features_kf_2, bootstrap_point_cloud, pose)
 
-# ploting setup
-est_path = []
-# initialize previous image
-last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
+gd_keypoints_1, gd_keypoints_2 = ransac_features_kf_1[gd_mask, :, :], ransac_features_kf_2[gd_mask, :, :]
+img_to_show = draw_optical_flow(cv2.cvtColor(img_grayscale, cv2.COLOR_GRAY2BGR), gd_keypoints_1, gd_keypoints_2, (0, 255, 0), 1, .15)
 
-# first “flow” image to show (just grayscale -> bgr)
-first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
 
-total_frames = last_frame - params.start_idx
-plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+cv2.imshow("Tracked points", img_to_show)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
 
-R_cw = homography[:3, :3]
-homography[:, 3] *= scale
-t_cw = homography[:, 3]
-R_wc = R_cw.T
-t_wc = - R_wc @ t_cw
-est_path.append([t_wc[0], t_wc[2]])
-theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
 
-#Initialize candidate set with the second keyframe
-potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
 
-# find which features are not currently tracked and add them as candidate features
-S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
-frame_counter = params.start_idx +1
-prev_pose = homography
-pose = homography
-scale =1
-for i in range(params.start_idx + 1, last_frame):
-    frame_counter+=1
-    # read in next image
-    image_path = images[i]
-    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        print(f"Warning: could not read {image_path}")
-        continue
+
+# # generate initial state
+# S = pipeline.bootstrapState(P_i=ransac_features_kf_2, X_i=bootstrap_point_cloud)
+
+# # ploting setup
+# est_path = []
+# # initialize previous image
+# last_image = cv2.imread(images[params.start_idx], cv2.IMREAD_GRAYSCALE)
+
+# # first “flow” image to show (just grayscale -> bgr)
+# first_vis = cv2.cvtColor(last_image, cv2.COLOR_GRAY2BGR)
+
+# total_frames = last_frame - params.start_idx
+# plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
+
+# R_cw = homography[:3, :3]
+# homography[:, 3] *= scale
+# t_cw = homography[:, 3]
+# R_wc = R_cw.T
+# t_wc = - R_wc @ t_cw
+# est_path.append([t_wc[0], t_wc[2]])
+# theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+
+# #Initialize candidate set with the second keyframe
+# potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
+
+# # find which features are not currently tracked and add them as candidate features
+# S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
+# frame_counter = params.start_idx +1
+# prev_pose = homography
+# pose = homography
+# scale =1
+# for i in range(params.start_idx + 1, last_frame):
+#     frame_counter+=1
+#     # read in next image
+#     image_path = images[i]
+#     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+#     if image is None:
+#         print(f"Warning: could not read {image_path}")
+#         continue
     
-    #Find the ground plane based on all the candidate features
-    scale = pipeline.ground_detection(S["P"], S["X"], pose)
+#     #Find the ground plane based on all the candidate features
+#     scale = pipeline.ground_detection(S["P"], S["X"], pose)
 
-    # track keypoints forward one frame
-    S, last_features, last_candidates = pipeline.trackForward(S, last_image, image)
+#     # track keypoints forward one frame
+#     S, last_features, last_candidates = pipeline.trackForward(S, last_image, image)
     
-    # plot tracked keypoints (pre-ransac) and candidate keypoints
-    img_to_show = draw_optical_flow(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), last_candidates, S["C"], (0, 0, 255), 1, .15)
+#     # plot tracked keypoints (pre-ransac) and candidate keypoints
+#     img_to_show = draw_optical_flow(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), last_candidates, S["C"], (0, 0, 255), 1, .15)
 
-    # estimate pose, only keeping inliers from PnP with RANSAC
-    S, pose, inliers_idx = pipeline.estimatePose(S)
+#     # estimate pose, only keeping inliers from PnP with RANSAC
+#     S, pose, inliers_idx = pipeline.estimatePose(S)
 
-    delta_t = pose[:3, 3] - prev_pose[:3, 3]
-    delta_t *= scale
-    pose[:3, 3] = prev_pose[:3, 3] + delta_t
+#     delta_t = pose[:3, 3] - prev_pose[:3, 3]
+#     delta_t *= scale
+#     pose[:3, 3] = prev_pose[:3, 3] + delta_t
     
-    # plot inlier keypoints
-    img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
+#     # plot inlier keypoints
+#     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
-    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
-    S = pipeline.tryTriangulating(params, S, pose)
+#     # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
+#     S = pipeline.tryTriangulating(params, S, pose)
 
-    # find features in current frame
-    potential_candidate_features = pipeline.extractFeaturesOperation(image)
+#     # find features in current frame
+#     potential_candidate_features = pipeline.extractFeaturesOperation(image)
 
-    # find which features are not currently tracked and add them as candidate features
-    S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
+#     # find which features are not currently tracked and add them as candidate features
+#     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
 
-    n_inliers = len(inliers_idx)
+#     n_inliers = len(inliers_idx)
 
-    # plot current pose
-    R_cw = pose[:3, :3]
-    t_cw = pose[:3, 3]
-    R_wc = R_cw.T
-    t_wc = - R_wc @ t_cw
-    est_path.append([t_wc[0], t_wc[2]])
-    theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
+#     # plot current pose
+#     R_cw = pose[:3, :3]
+#     t_cw = pose[:3, 3]
+#     R_wc = R_cw.T
+#     t_wc = - R_wc @ t_cw
+#     est_path.append([t_wc[0], t_wc[2]])
+#     theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] +np.pi/2)
     
-    updateTrajectoryPlot(
-        plot_state, 
-        np.asarray(est_path), 
-        theta, 
-        S["X"],
-        S["P"].shape[0], 
-        flow_bgr=img_to_show,
-        frame_idx=frame_counter,
-        n_inliers=n_inliers,
-    )
+#     updateTrajectoryPlot(
+#         plot_state, 
+#         np.asarray(est_path), 
+#         theta, 
+#         S["X"],
+#         S["P"].shape[0], 
+#         flow_bgr=img_to_show,
+#         frame_idx=frame_counter,
+#         n_inliers=n_inliers,
+#     )
 
-    # update last image
-    last_image = image
-    prev_pose = pose
+#     # update last image
+#     last_image = image
+#     prev_pose = pose
     
     # debugging prints
     #if last_features[inliers_idx].shape[0] < 50:
