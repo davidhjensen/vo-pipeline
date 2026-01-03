@@ -43,6 +43,7 @@ match DATASET:
         assert 'kitti_path' in locals(), "You must define kitti_path"
         img_dir = os.path.join(kitti_path, '05/image_0')
         images = sorted(glob(os.path.join(img_dir, '*.png')))
+        print(len(images))
         last_frame = 4540
         K = np.array([
             [7.18856e+02, 0, 6.071928e+02],
@@ -84,6 +85,8 @@ match DATASET:
         # Bundle adjustment parameters
         window_size = 5
 
+        alpha : float = 0.02
+
     case D.MALAGA:
         assert 'malaga_path' in locals(), "You must define malaga_path"
         img_dir = os.path.join(malaga_path, 'malaga-urban-dataset-extract-07_rectified_800x600_Images')
@@ -101,7 +104,7 @@ match DATASET:
         feature_params = dict(  maxCorners = 60,
                                 qualityLevel = 0.05,
                                 minDistance = 10,
-                                blockSize = 9 )
+                                blockSize = 7 )
         feature_params_gd_detection = dict( maxCorners = 100,
                                         qualityLevel = 0.005,
                                         minDistance = 3,
@@ -124,7 +127,9 @@ match DATASET:
         start_idx = MALAGA_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 10
+        window_size = 5
+
+        alpha : float = 0.02
         
     case D.PARKING:
         assert 'parking_path' in locals(), "You must define parking_path"
@@ -138,17 +143,23 @@ match DATASET:
     ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
         # Shi-Tomasi corner parameters    
         # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
-        feature_params = dict(  maxCorners = 60,
-                                qualityLevel = 0.05,
-                                minDistance = 10,
-                                blockSize = 9 )
+        # Paramaters for Shi-Tomasi corners
+        feature_params = dict( maxCorners = 100,
+                            qualityLevel = 0.1,
+                            minDistance = 7,
+                            blockSize = 7 )
+        
+        feature_params_gd_detection = dict( maxCorners = 100,
+                                        qualityLevel = 0.005,
+                                        minDistance = 3,
+                                        blockSize = 3)
 
         # Parameters for LKT
-        lk_params = dict(   winSize  = (21, 21),
-                            maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        lk_params = dict( winSize  = (21, 21),
+                        maxLevel = 2,
+                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-        new_feature_min_squared_diff = 4
+        new_feature_min_squared_diff = 5
         rows_roi_corners = 3
         cols_roi_corners = 3
         rows_roi_corners_bs = 3
@@ -161,6 +172,8 @@ match DATASET:
         
         # Bundle adjustment parameters
         window_size = 10
+
+        alpha : float = 0.01
         
     case D.CUSTOM:
         # Own Dataset
@@ -181,6 +194,10 @@ match DATASET:
                                 qualityLevel = 0.05,
                                 minDistance = 10,
                                 blockSize = 9 )
+        feature_params_gd_detection = dict( maxCorners = 100,
+                                        qualityLevel = 0.005,
+                                        minDistance = 3,
+                                        blockSize = 3)
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
@@ -199,6 +216,7 @@ match DATASET:
         
         # Bundle adjustment parameters
         window_size = 10
+        alpha : float = 0.02
         
     case _:
         raise ValueError("Invalid dataset index")
@@ -219,7 +237,6 @@ class VO_Params():
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
     abs_eig_min : float = 1e-2 
-    alpha : float = 0.02
 
     def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, shi_tomasi_params_bs, klt_params, k, start_idx, new_feature_min_squared_diff, window_size):
         self.bs_kf_1 = bs_kf_1
@@ -242,6 +259,7 @@ class VO_Params():
         ground_list = [self.idx_ground-1, self.idx_ground, self.idx_ground+1]
         self.idx_ground_set = set(ground_list)
         self.approx_car_height = 1.5
+        self.alpha = alpha
 
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -307,7 +325,7 @@ class Pipeline():
             st_corners = np.vstack((st_corners, features))
         return st_corners
     
-    def extractFeaturesGD(self):
+    def extractFeaturesGD(self, img):
         """
         Step 1 (Initialization): detect Shi-Tomasi corners on a grid using feature masks.
 
@@ -315,7 +333,10 @@ class Pipeline():
             st_corners (np.ndarray): (N, 1, 2) float32 corners for KLT tracking.
         """
         st_corners = np.empty((0, 1, 2), dtype=np.float32)
-        img_grayscale = cv2.imread(self.params.bs_kf_1, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            img_grayscale = cv2.imread(self.params.bs_kf_1, cv2.IMREAD_GRAYSCALE)
+        else: 
+            img_grayscale = img
         for n, mask in enumerate(self.params.feature_masks_bs):
             if n in self.params.idx_ground_set: 
                 features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params_bs)
@@ -875,7 +896,7 @@ class Pipeline():
         # generate initial state
         S = pipeline.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
 
-        gd_features_kf_1 = self.extractFeaturesGD()
+        gd_features_kf_1 = self.extractFeaturesGD(img=None)
         bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2 = self.trackForwardBootstrap(gd_features_kf_1)
         gd_point_cloud = self.bootstrapPointCloud(homography, bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2)
         scale=1
@@ -926,7 +947,7 @@ plot_same_window : bool = True     # splits the visualization into two windows f
 
 # create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
-use_scale : bool = True
+use_scale : bool = False
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
 img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
@@ -982,15 +1003,24 @@ for i in range(params.start_idx + 1, last_frame):
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
     
-    dummy=(np.zeros(2), 0)
-    pipeline.full_trajectory.append(dummy)
-    
+
     # perform sliding window bundle adjustment to refine pose and landmarks
     if use_sliding_window_BA:
+        dummy=(np.zeros(2), 0)
+        pipeline.full_trajectory.append(dummy)
         S["P_history"].append((S["P"].copy(), S["ids"].copy()))  # append the new keypoints
         S = pipeline.slidingWindowRefinement(S)
         pose = list(S["pose_history"])[-1]
         pipeline.full_trajectory = pipeline.updateFullTraj(S["pose_history"])
+    else: 
+        R_cw = pose[:3, :3]
+        t_cw = pose[:3, 3]
+        R_wc = R_cw.T
+        t_wc = - R_wc @ t_cw
+        theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+
+        state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
+        pipeline.full_trajectory.append(state_to_plot)
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
@@ -1023,6 +1053,7 @@ for i in range(params.start_idx + 1, last_frame):
         pipeline.full_trajectory,
         S["X"],
         S["P"].shape[0], 
+        gt=ground_truth,
         flow_bgr=img_to_show,
         frame_idx=frame_counter,
         n_inliers=n_inliers, 
