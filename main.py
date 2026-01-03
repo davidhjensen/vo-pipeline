@@ -9,7 +9,7 @@ import scipy
 from scipy.optimize import least_squares
 from collections import deque
 
-from visualization import initTrajectoryPlot, draw_optical_flow, initTrajectoryPlotNoFlow, updateTrajectoryPlotNoFlowBA, updateTrajectoryPlotBA
+from visualization import * 
 from BA_helper import as_lk_points, pack_params, get_jac_sparsity, compute_rep_err, unpack_params_T
 
 ##-------------------GLOBAL VARIABLES------------------##
@@ -68,6 +68,8 @@ match DATASET:
         new_feature_min_squared_diff = 4
         rows_roi_corners = 2
         cols_roi_corners = 4
+        rows_roi_corners_bs = 3
+        cols_roi_corners_bs = 5
         
         # Bootstrapping parameters
         bs_kf_1 = images[0]
@@ -104,6 +106,8 @@ match DATASET:
         new_feature_min_squared_diff = 4
         rows_roi_corners = 3
         cols_roi_corners = 3
+        rows_roi_corners_bs = 3
+        cols_roi_corners_bs = 5
         
         # Bootstrapping parameters
         bs_kf_1 = images[0]
@@ -138,6 +142,8 @@ match DATASET:
         new_feature_min_squared_diff = 4
         rows_roi_corners = 3
         cols_roi_corners = 3
+        rows_roi_corners_bs = 3
+        cols_roi_corners_bs = 5
         
         # Bootstrapping parameters
         bs_kf_1 = images[0]
@@ -174,6 +180,8 @@ match DATASET:
         new_feature_min_squared_diff = 4
         rows_roi_corners = 3
         cols_roi_corners = 3
+        rows_roi_corners_bs = 3
+        cols_roi_corners_bs = 5
         
         # Bootstrapping parameters
         bs_kf_1 = images[0]
@@ -189,6 +197,8 @@ match DATASET:
 class VO_Params():
     bs_kf_1 : str # path to first keyframe used for bootstrapping dataset
     bs_kf_2 : str # path to second keyframe used for bootstrapping dataset
+    rows_roi_corners_bs : int # number of rows to split image into for ground and feature detection in bootstrapping
+    cols_roi_corners_bs : int # number of cols to split image into for ground and feature detection in bootstrapping
     rows_roi_corners : int # number of rows to split image into for feature detection
     cols_roi_corners : int # number of cols to split image into for feature detection
     feature_masks : list[np.ndarray] # mask image into regions for feature tracking 
