@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import scipy
 
-from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow
+from visualization import initTrajectoryPlot, updateTrajectoryPlot, draw_optical_flow, visualize_ground_plane, draw_new_features, draw_plane_on_image
 from utils import get_mask_indices, get_weighted_y
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
 DATASET = 0
@@ -696,7 +696,7 @@ class Pipeline():
         n_iters: int = 200,
         dist_thresh: float = 0.05,
         expected_normal: np.ndarray = np.array([0, -1, 0]), 
-        angle_thresh: float = 0.7, # Cosine similarity (approx 25 degrees)
+        angle_thresh: float = 0.95, # Cosine similarity (approx 25 degrees)
     ):
         """
         Fits a plane, that aligns with normal.
@@ -763,7 +763,7 @@ class Pipeline():
         return n_refined, d_refined, best_inliers
 
     def estimate_ground_height(self, pts_3d, cur_pose):
-        if pts_3d.shape[1] < 15:
+        if pts_3d.shape[1] < 10:
             print("ERROR")
             return None
 
@@ -771,7 +771,7 @@ class Pipeline():
         d_ref = np.median(np.linalg.norm(pts_3d, axis=0))
         
         # Relaxed threshold slightly
-        dist_thresh = 0.03 * d_ref 
+        dist_thresh = 0.005 * d_ref 
 
         expected_up = np.array([0, 1, 0]) 
 
@@ -850,6 +850,7 @@ img_to_show = draw_optical_flow(cv2.cvtColor(img_grayscale, cv2.COLOR_GRAY2BGR),
 cv2.imshow("Tracked points", img_to_show)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
+
 # triangulate features from the first two keyframes to generate initial 3D point cloud
 bootstrap_point_cloud= pipeline.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
 
@@ -857,13 +858,42 @@ pose = homography[:, 3]
 scale, gd_mask, inliers = pipeline.ground_detection(ransac_features_kf_2, bootstrap_point_cloud, pose)
 
 gd_keypoints_1, gd_keypoints_2 = ransac_features_kf_1[gd_mask, :, :], ransac_features_kf_2[gd_mask, :, :]
-img_to_show = draw_optical_flow(cv2.cvtColor(img_grayscale, cv2.COLOR_GRAY2BGR), gd_keypoints_1, gd_keypoints_2, (0, 255, 0), 1, .15)
+gd_3D = bootstrap_point_cloud[:, gd_mask]
 
+gd_fit_1_3D = gd_3D[:, inliers]
+gd_fit_1, gd_fit_2 = gd_keypoints_1[inliers, :, :], gd_keypoints_2[inliers, :, :]
 
-cv2.imshow("Tracked points", img_to_show)
+X_ground = bootstrap_point_cloud[:, gd_mask]
+
+#DRAW ALL FEATURES IN BLUE 
+vis = draw_new_features(cv2.cvtColor(img_grayscale, cv2.COLOR_GRAY2BGR), ransac_features_kf_2, color=(255, 255, 0))
+
+#DRAW ESTIMATED GROUND IN RED 
+vis = draw_new_features(vis, gd_keypoints_2, color=(0, 0, 255))
+
+#DRAW INLIERS GROUND IN GREEN 
+vis = draw_new_features(vis, gd_fit_2, color=(0, 255, 0))
+
+# Recover plane parameters again for visualization
+n, d, _ = pipeline.fit_ground_plane_ransac(
+    gd_3D,
+    dist_thresh=0.001 * np.median(np.linalg.norm(gd_3D, axis=0)),
+    expected_normal=np.array([0, 1, 0])
+    )
+
+vis = draw_plane_on_image(vis, n, d, K, homography)
+cv2.imshow("Ground detection", vis)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
 
+visualize_ground_plane(
+    X_all=bootstrap_point_cloud,
+    X_ground=gd_3D,
+    inliers=inliers,
+    n=n,
+    d=d,
+    title="Bootstrap ground plane fit"
+)
 
 
 

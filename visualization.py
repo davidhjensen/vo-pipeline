@@ -320,3 +320,129 @@ def draw_new_features(
         )
 
     return vis
+
+def visualize_ground_plane(
+    X_all: np.ndarray,        # (3, N)
+    X_ground: np.ndarray,     # (3, Ng)
+    inliers: np.ndarray,      # (Ng,)
+    n: np.ndarray,            # (3,)
+    d: float,
+    title="Ground plane RANSAC (camera frame)"
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # --- RANSAC inliers ---
+    X_in = X_ground[:, inliers]
+
+    # --- all points (light background) ---
+    ax.scatter(
+        X_all[0], X_all[1], X_all[2],
+        c="gray", s=4, alpha=0.2
+    )
+
+    # --- ground candidates ---
+    ax.scatter(
+        X_ground[0], X_ground[1], X_ground[2],
+        c="red", s=15, alpha=0.6, label="Ground candidates"
+    )
+
+    # --- inliers ---
+    ax.scatter(
+        X_in[0], X_in[1], X_in[2],
+        c="green", s=25, label="RANSAC inliers"
+    )
+
+    # --- plane surface ---
+    # Plane: n_x x + n_y y + n_z z + d = 0 → y = ...
+    xx, zz = np.meshgrid(
+        np.linspace(X_in[0].min(), X_in[0].max(), 30),
+        np.linspace(X_in[2].min(), X_in[2].max(), 30)
+    )
+
+    if abs(n[1]) > 1e-6:
+        yy = (-d - n[0] * xx - n[2] * zz) / n[1]
+        ax.plot_surface(xx, yy, zz, alpha=0.3, color="blue")
+
+    # --- camera-style axes ---
+    ax.set_xlabel("X (right)")
+    ax.set_ylabel("Y (down)")
+    ax.set_zlabel("Z (forward)")
+
+    # --- zoom: use inliers only ---
+    center = X_in.mean(axis=1)
+    extent = np.max(np.ptp(X_in, axis=1)) * 0.6
+
+    ax.set_xlim(center[0] - extent, center[0] + extent)
+    ax.set_ylim(center[1] - extent, center[1] + extent)
+    ax.set_zlim(center[2] - extent, center[2] + extent)
+
+    # --- viewing angle: camera-like ---
+    ax.view_init(elev=15, azim=-90)
+
+    ax.set_title(title)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+def draw_plane_on_image(
+    img,
+    n, d,
+    K,
+    T_CW,
+    x_range=(-3.0, 2.0),     # narrower lateral extent
+    z_range=(1.5, 6.0),     # start further away
+    step=0.01,
+    color=(255, 0, 0),
+    alpha=0.3
+):
+    vis = img.copy()
+    overlay = img.copy()
+
+    R = T_CW[:, :3]
+    t = T_CW[:, 3]
+
+    pts_world = []
+    z_vals = np.linspace(z_range[0], z_range[1], 400)
+    z_vals = z_vals**1.3
+    for z in z_vals:
+        # make it narrower close, wider far (perspective-like)
+        x_max = 0.4 * z
+        for x in np.arange(x_range[0], x_range[1], step):
+            if abs(n[1]) < 1e-6:
+                continue
+            y = (-d - n[0]*x - n[2]*z) / n[1]
+            pts_world.append([x, y, z])
+
+    if len(pts_world) < 4:
+        return vis
+
+    pts_world = np.array(pts_world).T  # (3, N)
+
+    # World → camera
+    pts_cam = R @ pts_world + t[:, None]
+
+    mask = pts_cam[2] > 1.0
+    pts_cam = pts_cam[:, mask]
+
+    pts_img = K @ pts_cam
+    pts_img /= pts_img[2]
+
+    u = pts_img[0].astype(int)
+    v = pts_img[1].astype(int)
+
+    H, W = img.shape[:2]
+    valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    pts = np.stack([u[valid], v[valid]], axis=1)
+
+    # Draw as filled mesh (dense points)
+    for p in pts:
+        cv2.circle(overlay, tuple(p), 1, color, -1)
+
+    cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0, vis)
+    return vis
+
+
