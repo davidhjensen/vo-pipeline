@@ -15,14 +15,13 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
+DATASET = 2
+
 class D:
     KITTI = 0
     MALAGA = 1
     PARKING = 2
     CUSTOM = 3
-
-
-DATASET = 0
 
 # Next keyframe to use for bootstrapping
 KITTI_BS_KF = 3
@@ -52,9 +51,8 @@ match DATASET:
         ])
         ground_truth = np.loadtxt(os.path.join(kitti_path, 'poses', '05.txt'))
         ground_truth = ground_truth[:, [-9, -1]]  # same as MATLAB(:, [end-8 end])
-        
 
-    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+    ##------------------PARAMETERS FOR KITTI------------------##
         # Shi-Tomasi corner parameters
         feature_params = dict(  maxCorners = 60,
                                 qualityLevel = 0.01,
@@ -86,6 +84,7 @@ match DATASET:
         window_size = 5
 
         alpha : float = 0.02
+    ##--------------------------------------------------------##
 
     case D.MALAGA:
         assert 'malaga_path' in locals(), "You must define malaga_path"
@@ -99,7 +98,8 @@ match DATASET:
             [0, 0, 1]
         ])
         ground_truth = None
-    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+
+    ##------------------PARAMETERS FOR MALAGA------------------##
         # Shi-Tomasi corner parameters
         feature_params = dict(  maxCorners = 60,
                                 qualityLevel = 0.05,
@@ -130,6 +130,7 @@ match DATASET:
         window_size = 5
 
         alpha : float = 0.02
+    ##--------------------------------------------------------##
         
     case D.PARKING:
         assert 'parking_path' in locals(), "You must define parking_path"
@@ -140,7 +141,7 @@ match DATASET:
         ground_truth = np.loadtxt(os.path.join(parking_path, 'poses.txt'))
         ground_truth = ground_truth[:, [-9, -1]]
         
-    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+    ##------------------PARAMETERS FOR PARKING------------------##
         # Shi-Tomasi corner parameters    
         # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
         # Paramaters for Shi-Tomasi corners
@@ -174,6 +175,7 @@ match DATASET:
         window_size = 10
 
         alpha : float = 0.01
+    ##--------------------------------------------------------##
         
     case D.CUSTOM:
         # Own Dataset
@@ -188,7 +190,7 @@ match DATASET:
         ])
         ground_truth = None
         
-    ##------------------PARAMETERS FOR DIFFERENT DATASETS------------------##
+    ##------------------PARAMETERS FOR CUSTOM------------------##
         # Shi-Tomasi corner parameters    
         feature_params = dict(  maxCorners = 60,
                                 qualityLevel = 0.05,
@@ -216,7 +218,9 @@ match DATASET:
         
         # Bundle adjustment parameters
         window_size = 10
+
         alpha : float = 0.02
+    ##--------------------------------------------------------##
         
     case _:
         raise ValueError("Invalid dataset index")
@@ -402,14 +406,12 @@ class Pipeline():
         #recover the relative camera pose
         _,R,t,_ = cv2.recoverPose(E,points1[inliers],points2[inliers],K)
         
-
         return np.hstack((R, t)), points1[inliers, :, :], points2[inliers, :, :]
 
     def bootstrapPointCloud(self, H: np.ndarray, points_1: np.ndarray, points_2: np.ndarray) -> np.ndarray:
         """Bootstrap the initial 3D point cloud using least squares assuming the first frame is the origin
 
         Args:
-            params (VO_Params): params object for the dataset being used
             H (np.ndarray): homographic transformation from bootstrap keyframe 1 to 2
             points_1 (np.ndarray): keypoints detected in bootstrap keyframe 1
             points_2 (np.ndarray): keypoints tracked in bootstrap keyframe 2
@@ -439,7 +441,7 @@ class Pipeline():
             Args:
                 P_1: keypoints in the original (first) frame
                 P_2: keypoints in the second frame selected for bootstrapping
-                X_i: current landmarks from the second frame
+                X_2: current landmarks from the second frame
                 homography: relative transformation between first and second frame selected for bootstrapping
             Returns:
                 dict: the state in the form of a dictionary where each state-string variable is the key to get the value
@@ -467,6 +469,7 @@ class Pipeline():
             S["pose_history"] = deque(maxlen=self.params.window_size)
             S["pose_history"].append(np.hstack((np.eye(3), np.zeros((3,1))))) # frame zero, so the origin
             S["pose_history"].append(homography)  # frame one, the homography from frame 0 to frame 1 we found earlier
+
         return S
 
     def trackForward(self, state: dict[str:np.ndarray], img_1: np.ndarray, img_2: np.ndarray) -> Tuple[dict[str:np.ndarray], np.ndarray, np.ndarray]:
@@ -474,9 +477,9 @@ class Pipeline():
         Track 2D keypoints from img_1 to img_2 using KLT optical flow
 
         Args:
+            state (dict): current state
             img_1 (np.ndarray): first image (grayscale)
             img_2 (np.ndarray): second image (grayscale)
-            points_1 (np.ndarray): keypoints in img_1 to be tracked
         Returns:
             dict[str: np.ndarray]: updated state
             np.ndarray: keypoints from the previous frame that were successfully tracked forward
@@ -518,9 +521,7 @@ class Pipeline():
         Estimate camera pose using PnP RANSAC and update state to keep only inliers
         
         Args:
-            params (VO_Params): parameters for the VO pipeline
             state (dict): current state that also contains 2D keypoints and 3D points
-        
         Returns:
             tuple[dict, np.ndarray, np.ndarray]: updated state with only inliers for P and X and camera pose as 3x4 matrix and index of inliers
         """
@@ -564,12 +565,11 @@ class Pipeline():
         return new_state, T_w2c, inliers_idx
     
 
-    def tryTriangulating(self, params: VO_Params, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
+    def tryTriangulating(self, state: dict[str:np.ndarray], cur_pose: np.ndarray) -> dict[str:np.ndarray]:
         """
         Triangulate new points based on the bearing angle threshold to ensure sufficient baseline without relying on scale (ambiguous)
         
         Args:
-            params (VO_Params): parameters for the VO pipeline
             state (dict): current state that also contains 2D keypoints and 3D points
             cur_pose (np.ndarray): pose of current frame (3x4 matrix) 
         Returns:
@@ -589,7 +589,7 @@ class Pipeline():
 
         pts_2D_cur_hom = np.column_stack((pts_2D_cur, np.ones(m)))
         pts_2D_first_obs_hom = np.column_stack((pts_2D_first_obs, np.ones(m)))
-        K = params.k
+        K = self.params.k
         K_inv = np.linalg.inv(K)
         n_pts_2D_cur = K_inv @ pts_2D_cur_hom.T #(3,m)
         n_pts_2D_first_obs = K_inv @ pts_2D_first_obs_hom.T #(3,m)
@@ -621,8 +621,8 @@ class Pipeline():
         alpha = np.arccos(cos_alpha)
 
         #Find indices of where alpha exceeds the threshold
-        idx = np.where(alpha > params.alpha)[0]
-        not_idx = np.where(alpha <= params.alpha)[0]
+        idx = np.where(alpha > self.params.alpha)[0]
+        not_idx = np.where(alpha <= self.params.alpha)[0]
         
         #Extract the corresponding matrices
         poses = first_poses_mat[idx]
@@ -681,7 +681,7 @@ class Pipeline():
             tuple[valid_pts (np.ndarray), mask]: (3, j) posiitve-depth points and mask of valid points 
         """
 
-        #Transform from world coordinates into camera coordinates
+        # Transform from world coordinates into camera coordinates
         points_3d_hom = np.vstack((points_3d, np.ones(points_3d.shape[1])))
         p_3d_1 = Pi_1 @ points_3d_hom #(3,k)
         p_3d_2 = Pi_2 @ points_3d_hom #(3,k)
@@ -689,8 +689,8 @@ class Pipeline():
         mask = (p_3d_1[2,:]>0) & (p_3d_2[2,:]>0)
 
         valid_pts = points_3d[:,mask] #(3,j)
-        return valid_pts, mask
 
+        return valid_pts, mask
 
     def extractFeaturesOperation(self, img_grayscale):
         """
@@ -698,7 +698,6 @@ class Pipeline():
 
         Args:
             img_grayscale (np.ndarray): current frame in grayscale (H x W).
-
         Returns:
             potential_kp_candidates (np.ndarray): (N, 1, 2) float32 corners for KLT tracking.
         """
@@ -733,7 +732,6 @@ class Pipeline():
             S (dict): state
             potential_candidate_features (np.ndarray): features extracted from current frame
             cur_pose (np.ndarray): pose of current frame
-
         Returns:
             dict: updated state
         """
@@ -759,10 +757,10 @@ class Pipeline():
         S_new["C"] = np.vstack((S["C"], new_features))
         S_new["F"] = np.vstack((S["F"], new_features))
         S_new["T"] = np.vstack((S["T"], cur_pose.flatten()[None, :].repeat(new_features.shape[0], axis=0)))
+
         return S_new
     
-    
-    def ground_detection(self, current_keypoints:np.ndarray, current_3d_landmarks: np.ndarray):
+    def groundDetection(self, current_keypoints:np.ndarray, current_3d_landmarks: np.ndarray):
         
         current_keypoints = np.squeeze(current_keypoints,axis=1)
         idx_pts = get_mask_indices(self.params.H, self.params.W, self.params.rows_roi_corners_bs, self.params.cols_roi_corners_bs, current_keypoints)
@@ -779,11 +777,11 @@ class Pipeline():
                 self.last_scale=1
         
         return self.last_scale, gd_mask, inliers
-    
 
     def slidingWindowRefinement(self, S: dict) -> dict:
         """
         Perform sliding window bundle adjustment to refine camera poses and 3D landmarks in the current window.
+        
         Args:
             S (dict): current state containing pose history, landmark history, and observations.
         Returns:
@@ -838,7 +836,6 @@ class Pipeline():
             loss='huber', f_scale=1.0, method='trf', ftol=1e-3
         )
 
-
         # Update State with Refined Values
         new_poses, new_X, new_S = unpack_params_T(res.x, window_poses, n_landmarks, S)
         
@@ -846,7 +843,6 @@ class Pipeline():
         S = new_S
         S["X"] = new_X  # refined landmarks
         current_pose = new_poses[len(window_poses) - 1]
-        
 
         # Update history deques with refined values
         for i in range(len(S["pose_history"])):
@@ -878,6 +874,7 @@ class Pipeline():
     def pipeline_init(self, img):
         """
         Initialize the VO pipeline by bootstrapping from the first two keyframes.
+        
         Returns:
             tuple[dict, np.ndarray]: initial state and homographic transformation between the first two keyframes.
         """
@@ -900,8 +897,8 @@ class Pipeline():
         bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2 = self.trackForwardBootstrap(gd_features_kf_1)
         gd_point_cloud = self.bootstrapPointCloud(homography, bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2)
         scale=1
-        if self.use_scale : 
-            scale, gd_mask, inliers = pipeline.ground_detection(bs_gd_tracked_features_kf_2, gd_point_cloud)
+        if self.use_scale and DATASET in [D.KITTI]: 
+            scale, gd_mask, inliers = pipeline.groundDetection(bs_gd_tracked_features_kf_2, gd_point_cloud)
 
             if self.visualize : 
 
@@ -943,11 +940,11 @@ class Pipeline():
     
 # create instance of parameters
 params = VO_Params(bs_kf_1, bs_kf_2, feature_params, feature_params_gd_detection, lk_params, K, start_idx, new_feature_min_squared_diff, window_size)
-plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
+plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
 use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
-use_scale : bool = False
+use_scale : bool = True
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
 img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
@@ -966,7 +963,6 @@ if plot_same_window:
     plot_state = initTrajectoryPlot(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
 else:
     plot_state = initTrajectoryPlotNoFlow(ground_truth, first_flow_bgr=first_vis, total_frames=total_frames, rows=params.rows_roi_corners, cols=params.cols_roi_corners)
-    
 
 R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
@@ -1002,7 +998,6 @@ for i in range(params.start_idx + 1, last_frame):
 
     # estimate pose, only keeping inliers from PnP with RANSAC
     S, pose, inliers_idx = pipeline.estimatePose(S)
-    
 
     # perform sliding window bundle adjustment to refine pose and landmarks
     if use_sliding_window_BA:
@@ -1026,7 +1021,7 @@ for i in range(params.start_idx + 1, last_frame):
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
     # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
-    S = pipeline.tryTriangulating(params, S, pose)
+    S = pipeline.tryTriangulating(S, pose)
 
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
@@ -1045,7 +1040,6 @@ for i in range(params.start_idx + 1, last_frame):
               f"#Candidates Tracked: {last_candidates.shape[0]}\n"
               f"#Inliers for RANSAC: {last_features[inliers_idx].shape[0]}\n"
               f"#New Keypoints Added: {S['P'].shape[0] - last_features[inliers_idx].shape[0]}")
-    
     
     if plot_same_window:
         updateTrajectoryPlotBA(
@@ -1074,8 +1068,3 @@ for i in range(params.start_idx + 1, last_frame):
         cv2.waitKey(10)
 
 cv2.destroyAllWindows()
-
-
-
-
-

@@ -123,7 +123,7 @@ def estimate_ground_height(pts_3d, car_height):
     dist_thresh = 0.005 * d_ref 
 
     expected_up = np.array([0, 1, 0]) 
-    print("HEllo")
+
     n, d, inliers = fit_ground_plane_ransac(
         pts_3d, 
         dist_thresh=dist_thresh,
