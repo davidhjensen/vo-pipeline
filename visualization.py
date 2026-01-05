@@ -256,7 +256,6 @@ def updateTrajectoryPlotNoFlowBA(
     full_trajectory: list,
     pts3d: np.ndarray,
     n_keypoints: int,
-    flow_bgr: np.ndarray | None = None,
     frame_idx: int | None = None,
     n_inliers: int | None = None,
 ):

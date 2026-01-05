@@ -160,10 +160,9 @@ match DATASET:
         
     ##------------------PARAMETERS FOR PARKING------------------##
         # Shi-Tomasi corner parameters    
-        # TODO tune this dataset correctly the following code is just a dummy placeholder block that I copied from another dataset
         # Paramaters for Shi-Tomasi corners
         feature_params = dict( maxCorners = 100,
-                            qualityLevel = 0.01,
+                            qualityLevel = 0.05,
                             minDistance = 7,
                             blockSize = 7 )
         
@@ -176,8 +175,8 @@ match DATASET:
                                 distCoeffs=None,
                                 flags=cv2.SOLVEPNP_EPNP,
                                 reprojectionError=2.0,
-                                confidence=0.9,
-                                iterationsCount=100)
+                                confidence=0.99,
+                                iterationsCount=1000)
 
         # Parameters for LKT
         lk_params = dict( winSize  = (21, 21),
@@ -297,7 +296,7 @@ class VO_Params():
         self.idx_ground = self.rows_roi_corners_bs * self.cols_roi_corners_bs -(np.floor(self.cols_roi_corners_bs/2).astype(int)+1)
         ground_list = [self.idx_ground-1, self.idx_ground, self.idx_ground+1]
         self.idx_ground_set = set(ground_list)
-        self.approx_car_height = 1.5
+        self.approx_car_height = 1.65
         self.alpha = alpha
         self.abs_eig_min = abs_eig_min
 
@@ -873,7 +872,7 @@ class Pipeline():
         # Update current state
         S = new_S
         S["X"] = new_X  # refined landmarks
-        current_pose = new_poses[len(window_poses) - 1]
+        # current_pose = new_poses[len(window_poses) - 1]
 
         # Update history deques with refined values
         for i in range(len(S["pose_history"])):
@@ -983,11 +982,11 @@ params = VO_Params(bs_kf_1,
                    alpha, 
                    abs_eig_min)
 
-plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
+plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
-use_scale : bool = True
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
+use_scale : bool = False
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
 img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
@@ -1106,7 +1105,7 @@ for i in range(params.start_idx + 1, last_frame):
             pipeline.full_trajectory,
             S["X"],
             S["P"].shape[0], 
-            flow_bgr=img_to_show,
+            # flow_bgr=img_to_show,
             frame_idx=frame_counter,
             n_inliers=n_inliers
         )
