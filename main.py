@@ -16,7 +16,7 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 1
+DATASET = 0
 
 class D:
     KITTI = 0
@@ -74,9 +74,9 @@ match DATASET:
                                 iterationsCount=2000)
         
         # Parameters for LK
-        lk_params = dict(   winSize  = (21, 21),
+        lk_params = dict(   winSize  = (21,21),
                             maxLevel = 2, 
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 2
@@ -91,7 +91,7 @@ match DATASET:
         start_idx = KITTI_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 10
+        window_size = 5
 
         alpha : float = 0.02
         abs_eig_min : float = 0
@@ -111,8 +111,8 @@ match DATASET:
 
     ##------------------PARAMETERS FOR MALAGA------------------##
         # Shi-Tomasi corner parameters
-        feature_params = dict(  maxCorners = 100,
-                                qualityLevel = 0.01,
+        feature_params = dict(  maxCorners = 60,
+                                qualityLevel = 0.05,
                                 minDistance = 10,
                                 blockSize = 7 )
         feature_params_gd_detection = dict( maxCorners = 100,
@@ -122,15 +122,15 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                flags=cv2.SOLVEPNP_P3P,
-                                reprojectionError=2.0,
+                                flags=cv2.SOLVEPNP_EPNP,
+                                reprojectionError=5.0,
                                 confidence=0.99,
-                                iterationsCount=2000)
+                                iterationsCount=100)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
@@ -756,7 +756,7 @@ class Pipeline():
         )
         potential_kp_candidates = np.empty((0, 1, 2), dtype=np.float32)
         eig = cv2.cornerMinEigenVal(img_grayscale, blockSize=7, ksize=3)
-        min_features = 50
+        min_features = 30 #30 for no BA
         feature_list = []
         
         for n, mask in enumerate(self.params.feature_masks):
@@ -781,7 +781,7 @@ class Pipeline():
                 continue
             
             num_features = features.shape[0]
-            if num_features < min_features and num_features > 10: 
+            if num_features < min_features: 
                 min_features = num_features 
             
             feature_list.append(features)
@@ -1022,7 +1022,7 @@ params = VO_Params(bs_kf_1,
 plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
 use_scale : bool = False
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
@@ -1099,15 +1099,15 @@ for i in range(params.start_idx + 1, last_frame):
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
-
-    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
-    S = pipeline.tryTriangulating(S, pose)
-
+    
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
+    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
+    S = pipeline.tryTriangulating(S, pose)
+
     n_inliers = len(inliers_idx) 
 
     # update last image
