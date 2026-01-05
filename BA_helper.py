@@ -171,7 +171,7 @@ def unpack_params_T(x_vec: np.ndarray, window_poses: list[np.ndarray], n_landmar
         #Update S["T"]
         past_pose = window_poses[i+1]
         past_pose = past_pose.flatten()[None, :]
-        indices = np.where(np.all(np.isclose(new_S["T"], past_pose, atol=1e-8), axis=1))[0]
+        indices = np.where(np.all(np.isclose(S["T"], past_pose, atol=1e-8), axis=1))[0]
         idx = i * 6
         rvec = x_vec[idx:idx+3]
         t = x_vec[idx+3:idx+6]

@@ -57,7 +57,7 @@ match DATASET:
         # Shi-Tomasi corner parameters
 
         feature_params = dict(  maxCorners = 100,
-                                qualityLevel = 0.01,
+                                qualityLevel = 0.005,
                                 minDistance = 10)
                                 #blockSize = 7)
         
@@ -68,9 +68,9 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                reprojectionError=2.0, # CHAnGED
+                                reprojectionError=2.0, 
                                 flags=cv2.SOLVEPNP_P3P,
-                                confidence=0.99,
+                                confidence=0.98,
                                 iterationsCount=2000)
         
         # Parameters for LK
@@ -91,7 +91,7 @@ match DATASET:
         start_idx = KITTI_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 5
+        window_size = 10
 
         alpha : float = 0.02
         abs_eig_min : float = 0
@@ -344,7 +344,7 @@ class Pipeline():
         self.full_trajectory = []
         self.last_scale = 1
         self.use_scale : bool = use_scale
-        self.visualize = False
+        self.visualize = True
 
     def extractFeaturesBootstrap(self):
         """
@@ -723,6 +723,7 @@ class Pipeline():
         valid_pts = points_3d[:,mask] #(3,j)
 
         return valid_pts, mask
+    
     def build_exclusion_mask(self, keypoints_list, radius=8):
         """
         Create a mask that excludes pixels around existing keypoints.
@@ -741,7 +742,7 @@ class Pipeline():
 
         return excl
 
-    def extractFeaturesOperation(self, img_grayscale):
+    def extractFeaturesOperation(self, img_grayscale, S):
         """
         Step 1 (Initialization): detect Shi-Tomasi corners on a grid using feature masks to find new candidate keypoints.
 
@@ -756,7 +757,7 @@ class Pipeline():
         )
         potential_kp_candidates = np.empty((0, 1, 2), dtype=np.float32)
         eig = cv2.cornerMinEigenVal(img_grayscale, blockSize=7, ksize=3)
-        min_features = 30 #30 for no BA
+        min_features = 60 #30 for no BA
         feature_list = []
         
         for n, mask in enumerate(self.params.feature_masks):
@@ -958,14 +959,14 @@ class Pipeline():
         bootstrap_point_cloud = self.bootstrapPointCloud(homography, ransac_features_kf_1, ransac_features_kf_2)
         
         # generate initial state
-        S = pipeline.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
+        S = self.bootstrapState(P_1=ransac_features_kf_1,P_2=ransac_features_kf_2, X_2=bootstrap_point_cloud, homography=homography)
 
         gd_features_kf_1 = self.extractFeaturesGD(img=None)
         bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2 = self.trackForwardBootstrap(gd_features_kf_1)
         gd_point_cloud = self.bootstrapPointCloud(homography, bs_gd_tracked_features_kf_1, bs_gd_tracked_features_kf_2)
         scale=1
         if self.use_scale and DATASET in [D.KITTI]: 
-            scale, gd_mask, inliers = pipeline.groundDetection(bs_gd_tracked_features_kf_2, gd_point_cloud)
+            scale, gd_mask, inliers = self.groundDetection(bs_gd_tracked_features_kf_2, gd_point_cloud)
 
             if self.visualize and inliers is not None : 
 
@@ -1022,8 +1023,8 @@ params = VO_Params(bs_kf_1,
 plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
-use_scale : bool = False
+use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_scale : bool = True
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
 img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
@@ -1053,7 +1054,7 @@ state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
 pipeline.full_trajectory.append(state_to_plot)
 
 #Initialize candidate set with the second keyframe
-potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
+potential_candidate_features = pipeline.extractFeaturesOperation(last_image, S)
 
 # find which features are not currently tracked and add them as candidate features
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
@@ -1093,7 +1094,6 @@ for i in range(params.start_idx + 1, last_frame):
         R_wc = R_cw.T
         t_wc = - R_wc @ t_cw
         theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
-
         state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
         pipeline.full_trajectory.append(state_to_plot)
 
@@ -1101,10 +1101,11 @@ for i in range(params.start_idx + 1, last_frame):
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
     
     # find features in current frame
-    potential_candidate_features = pipeline.extractFeaturesOperation(image)
+    potential_candidate_features = pipeline.extractFeaturesOperation(image, S)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
+    
     # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
     S = pipeline.tryTriangulating(S, pose)
 
