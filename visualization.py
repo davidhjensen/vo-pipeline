@@ -25,24 +25,35 @@ def initTrajectoryPlot(
     H, W = first_flow_bgr.shape[:2]
 
     # ---------- GLOBAL TRAJECTORY ----------
-    if (gt_path is not None) and (len(gt_path) > 0):
-        x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
-        ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
+    # if (gt_path is not None) and (len(gt_path) > 0):
+    #     x_gt, y_gt = gt_path[:, 0], gt_path[:, 1]
+    #     #ax_global.plot(x_gt, y_gt, color="gray", lw=2, label="GT")
 
-        # start centered around GT extents
-        xmin, xmax = float(np.min(x_gt)), float(np.max(x_gt))
-        ymin, ymax = float(np.min(y_gt)), float(np.max(y_gt))
-        cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
+    #     # start centered around GT extents
+    #     xmin, xmax = float(np.min(x_gt)), float(np.max(x_gt))
+    #     ymin, ymax = float(np.min(y_gt)), float(np.max(y_gt))
+    #     cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
 
-        pad = 10.0
-        span = max((xmax - xmin), (ymax - ymin)) + 2 * pad
-        span = max(span, 250.0)  # minimum view
-        ax_global.set_xlim(cx - span / 2, cx + span / 2)
-        ax_global.set_ylim(cy - span / 2, cy + span / 2)
+    #     pad = 10.0
+    #     span = max((xmax - xmin), (ymax - ymin)) + 2 * pad
+    #     span = max(span, 250.0)  # minimum view
+    #     ax_global.set_xlim(cx - span / 2, cx + span / 2)
+    #     ax_global.set_ylim(cy - span / 2, cy + span / 2)
+    # else:
+    #     span = 250.0
+    #     ax_global.set_xlim(-span/2, span/2)
+    #     ax_global.set_ylim(-span/2, span/2)
+    
+    if gt_path is not None and len(gt_path) > 0:
+        x0, y0 = gt_path[0]
+        gt_line, = ax_global.plot([], [], "gray", lw=2, label="GT")
+        span = 50.0   # small initial window
+        ax_global.set_xlim(x0 - span, x0 + span)
+        ax_global.set_ylim(y0 - span, y0 + span)
     else:
-        span = 250.0
-        ax_global.set_xlim(-span/2, span/2)
-        ax_global.set_ylim(-span/2, span/2)
+        span = 50.0
+        ax_global.set_xlim(-span, span)
+        ax_global.set_ylim(-span, span)
 
     est_line, = ax_global.plot([], [], "r-", lw=2, label="VO")
     est_point, = ax_global.plot([], [], "ro")
@@ -112,7 +123,7 @@ def initTrajectoryPlot(
     plt.tight_layout()
     plt.show()
 
-    return {
+    state = {
         "fig": fig,
         "ax_global": ax_global,
         "ax_local": ax_local,
@@ -120,6 +131,7 @@ def initTrajectoryPlot(
         "ax_kp": ax_kp,
         "est_line": est_line,
         "est_point": est_point,
+        "gt_line":None,
         "heading_arrow": heading_arrow,
         "local_traj": local_traj,
         "map_scatter": map_scatter,
@@ -139,6 +151,10 @@ def initTrajectoryPlot(
         "grid_rows": rows,
         "grid_cols": cols,
     }
+    if gt_path is not None and len(gt_path) > 0:
+        state["gt_line"] = gt_line
+    
+    return state
 
 def initTrajectoryPlotNoFlow(
     gt_path: np.ndarray,
@@ -245,6 +261,7 @@ def updateTrajectoryPlotNoFlowBA(
     n_inliers: int | None = None,
 ):
      # ---------- GLOBAL ----------
+     
     points = [state[0] for state in full_trajectory]
     angles = [state[1] for state in full_trajectory]
     theta = angles[-1]
@@ -341,21 +358,35 @@ def updateTrajectoryPlotBA(
     full_trajectory: list,
     pts3d: np.ndarray,
     n_keypoints: int,
+    gt: np.ndarray,
     flow_bgr: np.ndarray | None = None,
     frame_idx: int | None = None,
     n_inliers: int | None = None,
+    scale :float = 1.0, 
+    fps : float = None
 ):
     # ---------- GLOBAL ----------
+    x0_g = 0
+    y0_g=0
+    if plot_state["gt_line"] is not None:
+        plot_state["gt_line"].set_data(
+        gt[:frame_idx+1, 0],
+        gt[:frame_idx+1, 1]) 
+        x0_g, y0_g = float(gt[frame_idx, 0]), float(gt[frame_idx, 1])
+
     points = [state[0] for state in full_trajectory]
     angles = [state[1] for state in full_trajectory]
     theta = angles[-1]
     
-    est_path = np.stack(points)
+    pts_3d = pts3d.copy()
+    est_path = scale*np.stack(points)
+    pts_3d*=scale
     x, y = est_path[:, 0], est_path[:, 1]
     plot_state["est_line"].set_data(x, y)
     plot_state["est_point"].set_data([x[-1]], [y[-1]])
 
     x0, y0 = float(x[-1]), float(y[-1])
+    
     L = plot_state["arrow_len"]
     plot_state["heading_arrow"].set_positions(
         (x0, y0), (x0 + L*np.cos(theta), y0 + L*np.sin(theta))
@@ -372,14 +403,18 @@ def updateTrajectoryPlotBA(
     pad_y = max(10.0, 0.08 * span_y)
 
     changed = False
-    if x0 < xmin + pad_x:
-        xmin = x0 - pad_x; changed = True
-    elif x0 > xmax - pad_x:
-        xmax = x0 + pad_x; changed = True
-    if y0 < ymin + pad_y:
-        ymin = y0 - pad_y; changed = True
-    elif y0 > ymax - pad_y:
-        ymax = y0 + pad_y; changed = True
+    xm = min(x0, x0_g)
+    xM= max(x0, x0_g)
+    ym = min(y0, y0_g)
+    yM= max(y0, y0_g)
+    if xm < xmin + pad_x:
+        xmin = xm - pad_x; changed = True
+    elif xM > xmax - pad_x:
+        xmax = xM + pad_x; changed = True
+    if ym < ymin + pad_y:
+        ymin = ym - pad_y; changed = True
+    elif yM > ymax - pad_y:
+        ymax = yM + pad_y; changed = True
 
     if changed:
         axg.set_xlim(xmin, xmax)
@@ -393,8 +428,8 @@ def updateTrajectoryPlotBA(
     y_loc = y[-k:]
     plot_state["local_traj"].set_data(x_loc, y_loc)
 
-    if pts3d.size > 0:
-        plot_state["map_scatter"].set_offsets(np.column_stack((pts3d[0, :], pts3d[2, :])))
+    if pts_3d.size > 0:
+        plot_state["map_scatter"].set_offsets(np.column_stack((pts_3d[0, :], pts_3d[2, :])))
 
     axl = plot_state["ax_local"]
     cx, cy = x_loc[-1], y_loc[-1]
@@ -436,8 +471,8 @@ def updateTrajectoryPlotBA(
         if tot is None:
             plot_state["fig"].suptitle(f"Frame {frame_idx}")
         else:
-            plot_state["fig"].suptitle(f"Frame {frame_idx} / {tot}")
-
+            plot_state["fig"].suptitle(f"Frame {frame_idx} / {tot}    |    FPS (not considering plotting): {fps:.1f}"
+)
     plt.pause(0.001)
 
 def draw_optical_flow(
