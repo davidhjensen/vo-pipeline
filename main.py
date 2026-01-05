@@ -161,7 +161,7 @@ match DATASET:
     ##------------------PARAMETERS FOR PARKING------------------##
         # Shi-Tomasi corner parameters    
         # Paramaters for Shi-Tomasi corners
-        feature_params = dict( maxCorners = 100,
+        feature_params = dict( maxCorners = 150,
                             qualityLevel = 0.05,
                             minDistance = 7,
                             blockSize = 7 )
