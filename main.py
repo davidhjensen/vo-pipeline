@@ -16,7 +16,7 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 3
+DATASET = 2
 
 class D:
     KITTI = 0
@@ -173,7 +173,7 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                flags=cv2.SOLVEPNP_EPNP,
+                                flags=cv2.SOLVEPNP_P3P,
                                 reprojectionError=2.0,
                                 confidence=0.99,
                                 iterationsCount=1000)
@@ -196,7 +196,7 @@ match DATASET:
         start_idx = PARKING_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 10
+        window_size = 5
 
         alpha : float = 0.05
         abs_eig_min : float = 1e-5
@@ -228,7 +228,7 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                flags=cv2.SOLVEPNP_EPNP,
+                                flags=cv2.SOLVEPNP_P3P,
                                 reprojectionError=5.0,
                                 confidence=0.99,
                                 iterationsCount=100)
@@ -1022,8 +1022,8 @@ params = VO_Params(bs_kf_1,
 plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
-use_scale : bool = False
+use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_scale : bool = True
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
 img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
