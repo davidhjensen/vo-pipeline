@@ -139,7 +139,7 @@ def estimate_ground_height(pts_3d, car_height):
     # d is distance from origin to plane.
     height = abs(d) #of the points in the world coordinate
     print(inlier_ratio, car_height-height)
-    if inlier_ratio > 0.35 and 0.15 < abs(car_height-height)< 0.8:    
+    if inlier_ratio > 0.35 and 0.15 < abs(car_height-height)< 1.0:    
         return height, inliers
     else: 
         print("NOT ENOUGH INLIERS TO ESTIMATE A GOOD PLANE ")

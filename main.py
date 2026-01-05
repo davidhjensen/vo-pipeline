@@ -16,7 +16,7 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 2
+DATASET = 3
 
 class D:
     KITTI = 0
@@ -43,7 +43,6 @@ match DATASET:
         assert 'kitti_path' in locals(), "You must define kitti_path"
         img_dir = os.path.join(kitti_path, '05/image_0')
         images = sorted(glob(os.path.join(img_dir, '*.png')))
-        print(len(images))
         last_frame = 4540
         K = np.array([
             [7.18856e+02, 0, 6.071928e+02],
@@ -55,10 +54,11 @@ match DATASET:
 
     ##------------------PARAMETERS FOR KITTI------------------##
         # Shi-Tomasi corner parameters
-        feature_params = dict(  maxCorners = 60,
+
+        feature_params = dict(  maxCorners = 100,
                                 qualityLevel = 0.01,
-                                minDistance = 10,
-                                blockSize = 7)
+                                minDistance = 10)
+                                #blockSize = 7)
         
         feature_params_gd_detection = dict( maxCorners = 100,
                                         qualityLevel = 0.005,
@@ -67,18 +67,18 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
+                                reprojectionError=2.0, # CHAnGED
                                 flags=cv2.SOLVEPNP_P3P,
-                                reprojectionError=5.0,
                                 confidence=0.99,
-                                iterationsCount=100)
+                                iterationsCount=2000)
         
         # Parameters for LK
         lk_params = dict(   winSize  = (21, 21),
-                            maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+                            maxLevel = 2, 
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-        new_feature_min_squared_diff = 4
+        new_feature_min_squared_diff = 2
         rows_roi_corners = 2
         cols_roi_corners = 4
         rows_roi_corners_bs = 3
@@ -90,10 +90,10 @@ match DATASET:
         start_idx = KITTI_BS_KF
         
         # Bundle adjustment parameters
-        window_size = 5
+        window_size = 10
 
         alpha : float = 0.02
-        abs_eig_min : float = 1e-2
+        abs_eig_min : float = 0
 
     case D.MALAGA:
         assert 'malaga_path' in locals(), "You must define malaga_path"
@@ -110,8 +110,8 @@ match DATASET:
 
     ##------------------PARAMETERS FOR MALAGA------------------##
         # Shi-Tomasi corner parameters
-        feature_params = dict(  maxCorners = 60,
-                                qualityLevel = 0.05,
+        feature_params = dict(  maxCorners = 100,
+                                qualityLevel = 0.01,
                                 minDistance = 10,
                                 blockSize = 7 )
         feature_params_gd_detection = dict( maxCorners = 100,
@@ -121,15 +121,15 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                flags=cv2.SOLVEPNP_EPNP,
+                                flags=cv2.SOLVEPNP_P3P,
                                 reprojectionError=5.0,
                                 confidence=0.99,
-                                iterationsCount=100)
+                                iterationsCount=2000)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.01))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
@@ -342,7 +342,7 @@ class Pipeline():
         self.full_trajectory = []
         self.last_scale = 1
         self.use_scale : bool = use_scale
-        self.visualize = True
+        self.visualize = False
 
     def extractFeaturesBootstrap(self):
         """
@@ -721,6 +721,23 @@ class Pipeline():
         valid_pts = points_3d[:,mask] #(3,j)
 
         return valid_pts, mask
+    def build_exclusion_mask(self, keypoints_list, radius=8):
+        """
+        Create a mask that excludes pixels around existing keypoints.
+
+        keypoints_list: list of (N,1,2) arrays (e.g. [S["P"], S["C"]])
+        """
+        H, W = self.params.H, self.params.W
+        excl = np.zeros((H, W), dtype=np.uint8)
+
+        for kp_arr in keypoints_list:
+            if kp_arr.size == 0:
+                continue
+            pts = kp_arr.reshape(-1, 2).astype(int)
+            for u, v in pts:
+                cv2.circle(excl, (u, v), radius, 255, -1)
+
+        return excl
 
     def extractFeaturesOperation(self, img_grayscale):
         """
@@ -731,12 +748,22 @@ class Pipeline():
         Returns:
             potential_kp_candidates (np.ndarray): (N, 1, 2) float32 corners for KLT tracking.
         """
+        excl_mask = self.build_exclusion_mask(
+            [S["P"], S["C"]],
+            radius=self.params.new_feature_min_squared_diff
+        )
         potential_kp_candidates = np.empty((0, 1, 2), dtype=np.float32)
         eig = cv2.cornerMinEigenVal(img_grayscale, blockSize=7, ksize=3)
+        min_features = 50
+        feature_list = []
+        
         for n, mask in enumerate(self.params.feature_masks):
-            
+            effective_mask = cv2.bitwise_and(
+                mask,
+                cv2.bitwise_not(excl_mask)
+            )
             # Shi–Tomasi corner detector: use a threshold on the minimum eigenvalue to avoid low texture regions
-            eig_roi = eig[mask > 0]
+            eig_roi = eig[effective_mask > 0]
             if eig_roi.size == 0:
                 continue
 
@@ -744,14 +771,22 @@ class Pipeline():
             if float(eig_roi.max()) < self.params.abs_eig_min:
                 continue
             
-            features = cv2.goodFeaturesToTrack(img_grayscale, mask=mask, **self.params.shi_tomasi_params)
+            features = cv2.goodFeaturesToTrack(img_grayscale, mask=effective_mask, **self.params.shi_tomasi_params)
             
             # If no corners are found in this region, skip it
             if features is None: 
                 print(f"No features found for mask {n+1}!")
                 continue
             
-            potential_kp_candidates = np.vstack((potential_kp_candidates, features))
+            num_features = features.shape[0]
+            if num_features < min_features and num_features > 15: 
+                min_features = num_features 
+            
+            feature_list.append(features)
+
+        for feat in feature_list: 
+            features_to_track = feat[:min_features, :, :]
+            potential_kp_candidates = np.vstack((potential_kp_candidates, features_to_track))
         
         return potential_kp_candidates
 
@@ -892,7 +927,9 @@ class Pipeline():
             t_cw = pose[:3, 3]
             R_wc = R_cw.T
             t_wc = - R_wc @ t_cw
-            theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
+            forward_vec = R_wc[:, 2]
+            theta = np.arctan2(forward_vec[0], forward_vec[2])
+            theta = theta - (np.pi)/2 if DATASET != D.MALAGA else theta
             state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
             local_traj.append(state_to_plot)
         
@@ -1010,8 +1047,9 @@ R_cw = homography[:3, :3]
 t_cw = homography[:3, 3]
 R_wc = R_cw.T
 t_wc = - R_wc @ t_cw
-theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
-
+forward_vec = R_wc[:, 2]
+theta = np.arctan2(forward_vec[0], forward_vec[2])
+theta = theta - (np.pi)/2 if DATASET != D.MALAGA else theta
 state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
 pipeline.full_trajectory.append(state_to_plot)
 
@@ -1055,22 +1093,24 @@ for i in range(params.start_idx + 1, last_frame):
         t_cw = pose[:3, 3]
         R_wc = R_cw.T
         t_wc = - R_wc @ t_cw
-        theta = -(scipy.spatial.transform.Rotation.from_matrix(R_wc).as_euler("xyz")[1] + np.pi/2)
-
+        forward_vec = R_wc[:, 2]
+        theta = np.arctan2(forward_vec[0], forward_vec[2])
+        theta = theta - (np.pi)/2 if DATASET != D.MALAGA else theta
         state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
         pipeline.full_trajectory.append(state_to_plot)
 
     # plot inlier keypoints
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
-    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
-    S = pipeline.tryTriangulating(S, pose)
-
     # find features in current frame
     potential_candidate_features = pipeline.extractFeaturesOperation(image)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
+
+    # attempt triangulating candidate keypoints, only adding ones with sufficient baseline
+    S = pipeline.tryTriangulating(S, pose)
+
     n_inliers = len(inliers_idx) 
 
     # update last image
