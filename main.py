@@ -16,7 +16,7 @@ from GD_helper import get_mask_indices, estimate_ground_height, fit_ground_plane
 
 ##-------------------GLOBAL VARIABLES------------------##
 # Dataset -> 0: KITTI, 1: Malaga, 2: Parking, 3: Own Dataset
-DATASET = 2
+DATASET = 1
 
 class D:
     KITTI = 0
@@ -58,7 +58,10 @@ match DATASET:
         feature_params = dict(  maxCorners = 100,
                                 qualityLevel = 0.01,
                                 minDistance = 10)
-                                #blockSize = 7)
+        
+        feature_params_BA = dict(  maxCorners = 100,
+                                qualityLevel = 0.005,
+                                minDistance = 10)
         
         feature_params_gd_detection = dict( maxCorners = 100,
                                         qualityLevel = 0.005,
@@ -67,15 +70,26 @@ match DATASET:
         #RANSAC PARAMETERS 
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
-                                reprojectionError=2.0, # CHAnGED
+                                reprojectionError=2.0, 
                                 flags=cv2.SOLVEPNP_P3P,
                                 confidence=0.99,
+                                iterationsCount=2000)
+        
+        ransac_params_BA = dict( cameraMatrix=K,
+                                distCoeffs=None,
+                                reprojectionError=2.0, 
+                                flags=cv2.SOLVEPNP_P3P,
+                                confidence=0.98,
                                 iterationsCount=2000)
         
         # Parameters for LK
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2, 
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
+        
+        lk_params_BA = dict( winSize  = (21, 21),
+                            maxLevel = 2, 
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.001))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 2
@@ -94,6 +108,9 @@ match DATASET:
 
         alpha : float = 0.02
         abs_eig_min : float = 0
+        min_features : int = 30
+        min_features_BA : int = 60
+
 
     case D.MALAGA:
         assert 'malaga_path' in locals(), "You must define malaga_path"
@@ -110,6 +127,24 @@ match DATASET:
 
     ##------------------PARAMETERS FOR MALAGA------------------##
         # Shi-Tomasi corner parameters
+        feature_params_BA = dict(  maxCorners = 100,
+                                qualityLevel = 0.01,
+                                minDistance = 10,
+                                blockSize = 7 )
+
+        #RANSAC PARAMETERS 
+        ransac_params_BA = dict(   cameraMatrix=K,
+                                distCoeffs=None,
+                                flags=cv2.SOLVEPNP_P3P,
+                                reprojectionError=2.0,
+                                confidence=0.99,
+                                iterationsCount=2000)
+
+        # Parameters for LKT
+        lk_params_BA = dict(   winSize  = (21, 21),
+                            maxLevel = 2,
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
+        
         feature_params = dict(  maxCorners = 100,
                                 qualityLevel = 0.01,
                                 minDistance = 10,
@@ -122,14 +157,14 @@ match DATASET:
         ransac_params = dict(   cameraMatrix=K,
                                 distCoeffs=None,
                                 flags=cv2.SOLVEPNP_P3P,
-                                reprojectionError=5.0,
+                                reprojectionError=2.0,
                                 confidence=0.99,
                                 iterationsCount=2000)
 
         # Parameters for LKT
         lk_params = dict(   winSize  = (21, 21),
                             maxLevel = 2,
-                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.01))
+                            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 25, 0.001))
         
         # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
         new_feature_min_squared_diff = 4
@@ -148,6 +183,8 @@ match DATASET:
 
         alpha : float = 0.02
         abs_eig_min : float = 1e-2
+        min_features : int = 50
+        min_features_BA : int = 50
         
     case D.PARKING:
         assert 'parking_path' in locals(), "You must define parking_path"
@@ -274,8 +311,8 @@ class VO_Params():
     k : np.ndarray # camera intrinsics matrix
     start_idx: int # index of the frame to start continous operation at (2nd bootstrap keyframe index)
     new_feature_min_squared_diff: float # min squared diff in pxl from a new feature to the nearest existing feature for the new feature to be added
-
-    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, shi_tomasi_params_bs, klt_params, ransac_params, k, start_idx, new_feature_min_squared_diff, window_size, alpha, abs_eig_min):
+    min_features : int
+    def __init__(self, bs_kf_1, bs_kf_2, shi_tomasi_params, shi_tomasi_params_bs, klt_params, ransac_params, k, start_idx, new_feature_min_squared_diff, window_size, alpha, abs_eig_min, min_features):
         self.bs_kf_1 = bs_kf_1
         self.bs_kf_2 = bs_kf_2
         self.feature_masks_bs = self.get_feature_masks(bs_kf_1, rows_roi_corners_bs, cols_roi_corners_bs)
@@ -299,6 +336,7 @@ class VO_Params():
         self.approx_car_height = 1.65
         self.alpha = alpha
         self.abs_eig_min = abs_eig_min
+        self.min_features = min_features
 
     def get_feature_masks(self, img_path, rows, cols) -> list[np.ndarray]:
         """Generate masks for each cell in a grid
@@ -739,7 +777,7 @@ class Pipeline():
 
         return excl
 
-    def extractFeaturesOperation(self, img_grayscale):
+    def extractFeaturesOperation(self, img_grayscale, S):
         """
         Step 1 (Initialization): detect Shi-Tomasi corners on a grid using feature masks to find new candidate keypoints.
 
@@ -754,8 +792,8 @@ class Pipeline():
         )
         potential_kp_candidates = np.empty((0, 1, 2), dtype=np.float32)
         eig = cv2.cornerMinEigenVal(img_grayscale, blockSize=7, ksize=3)
-        min_features = 50
         feature_list = []
+        min_features = self.params.min_features
         
         for n, mask in enumerate(self.params.feature_masks):
             effective_mask = cv2.bitwise_and(
@@ -1005,25 +1043,44 @@ class Pipeline():
         
         return (S, homography, scale)
     
-# create instance of parameters
-params = VO_Params(bs_kf_1, 
-                   bs_kf_2, 
-                   feature_params, 
-                   feature_params_gd_detection, 
-                   lk_params, 
-                   ransac_params, 
-                   K, 
-                   start_idx, 
-                   new_feature_min_squared_diff, 
-                   window_size, 
-                   alpha, 
-                   abs_eig_min)
 
-plot_same_window : bool = False     # splits the visualization into two windows for poor computers like mine
+
+plot_same_window : bool = True     # splits the visualization into two windows for poor computers like mine
 
 # create instance of pipeline
-use_sliding_window_BA : bool = True   # boolean to decide if BA is used or not
+use_sliding_window_BA : bool = False   # boolean to decide if BA is used or not
 use_scale : bool = True
+# create instance of parameters
+if use_sliding_window_BA: 
+    params = VO_Params(bs_kf_1, 
+                    bs_kf_2, 
+                    feature_params_BA, 
+                    feature_params_gd_detection, 
+                    lk_params_BA, 
+                    ransac_params_BA, 
+                    K, 
+                    start_idx, 
+                    new_feature_min_squared_diff, 
+                    window_size, 
+                    alpha, 
+                    abs_eig_min, 
+                    min_features_BA)
+else: 
+    params = VO_Params(
+                    bs_kf_1, 
+                    bs_kf_2, 
+                    feature_params, 
+                    feature_params_gd_detection, 
+                    lk_params, 
+                    ransac_params, 
+                    K, 
+                    start_idx, 
+                    new_feature_min_squared_diff, 
+                    window_size, 
+                    alpha, 
+                    abs_eig_min, 
+                    min_features)
+    
 pipeline = Pipeline(params = params, use_sliding_window_BA = use_sliding_window_BA, use_scale=use_scale)
 
 img = cv2.imread(params.bs_kf_2, cv2.IMREAD_GRAYSCALE)
@@ -1054,7 +1111,7 @@ state_to_plot = (np.array([t_wc[0], t_wc[2]]), theta)
 pipeline.full_trajectory.append(state_to_plot)
 
 #Initialize candidate set with the second keyframe
-potential_candidate_features = pipeline.extractFeaturesOperation(last_image)
+potential_candidate_features = pipeline.extractFeaturesOperation(last_image, S)
 
 # find which features are not currently tracked and add them as candidate features
 S = pipeline.addNewFeatures(S, potential_candidate_features, homography)
@@ -1103,7 +1160,7 @@ for i in range(params.start_idx + 1, last_frame):
     img_to_show = draw_optical_flow(img_to_show, last_features[inliers_idx], S["P"], (0, 255, 0), 1, .15)
 
     # find features in current frame
-    potential_candidate_features = pipeline.extractFeaturesOperation(image)
+    potential_candidate_features = pipeline.extractFeaturesOperation(image, S)
 
     # find which features are not currently tracked and add them as candidate features
     S = pipeline.addNewFeatures(S, potential_candidate_features, pose)
