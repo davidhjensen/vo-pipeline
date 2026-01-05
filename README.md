@@ -1,8 +1,7 @@
 # Visual Odometry Pipeline
-The repo contains a full-stack implementation in Python utilizing OpenCV functions. A general overview of the pipeline is provided below - for a more detailed description, see the project [report](). *ADD LINK TO REPORT*
+The repo contains a full-stack implementation in Python utilizing OpenCV functions. A general overview of the pipeline is provided below - for a more detailed description, see the [project report](./assets/VAMR_group_project_report_Jensen_Ferranti_Pirini_Rubini.pdf).
 
-[![Watch the video](https://raw.githubusercontent.com/yourusername/yourrepository/main/assets/thumbnail.jpg)](https://raw.githubusercontent.com/yourusername/yourrepository/main/assets/video.mp4)
-*ADD ACTUAL VIDEO AND THUMBNAIL TO REPO AND UPDATE THESE LINKS*
+[![Watch the video](https://raw.githubusercontent.com/davidhjensen/vo-pipeline/tree/main/assets/thumbnail.jpg)](https://raw.githubusercontent.com/davidhjensen/vo-pipeline/tree/main/assets/thumbnail.jpg)
 
 ## Overview
 
@@ -29,10 +28,10 @@ Listed below are the algorithms used for the main functionality:
 Four datasets are used for testing:
 - [Malaga 07](https://www.mrpt.org/MalagaUrbanDataset#:~:text=malaga%2Durban%2Ddataset%2Dextract%2D07.zip)
 - [KITTI 05](https://www.cvlibs.net/datasets/kitti/raw_data.php)
-- [Parking](https://www.google.com) *ADD LINK!*
-- [Custom](https://www.google.com) *ADD LINK!*
+- Parking
+- Custom
 
-They can be downloaded, extracted, and copied into the corrisponding folders in the repo to validate functionality.
+Malaga 07 and KITTI 05 can be downloaded, extracted, and copied into the corrisponding folders in the repo to validate functionality.
 
 ## Development Environment
 The project uses a Conda environment named: vo_env
