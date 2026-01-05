@@ -1,7 +1,7 @@
 # Visual Odometry Pipeline
 The repo contains a full-stack implementation in Python utilizing OpenCV functions. A general overview of the pipeline is provided below - for a more detailed description, see the [project report](./assets/VAMR_group_project_report_Jensen_Ferranti_Pirini_Rubini.pdf).
 
-[![Kitty Dataset](./assets/thumbnail.jpg)](./assets/KITTI_Jensen_Ferranti_Pirini_Rubini.mp4)
+<video src="./assets/KITTI_Jensen_Ferranti_Pirini_Rubini.mp4"/>
 
 ## Overview
 
